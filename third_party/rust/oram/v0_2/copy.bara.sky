@@ -1,0 +1,29 @@
+core.workflow(
+    name = "default",
+    origin = git.origin(
+        url = "https://github.com/facebook/oram.git",
+        ref = "0505e9c169653b754a9a548090ec494cc167b444",
+    ),
+    origin_files = glob([
+        "src/**",
+        "Cargo.toml",
+        "LICENSE*",
+        "README.md",
+        "benches/**",
+    ]),
+    destination = piper.destination(
+        mode = "DRAFT_CL",
+    ),
+    destination_files = glob(
+        ["google3/third_party/rust/oram/v0_2/**"],
+        exclude = [
+            "google3/third_party/rust/oram/v0_2/BUILD",
+            "google3/third_party/rust/oram/v0_2/METADATA",
+            "google3/third_party/rust/oram/v0_2/copy.bara.sky",
+        ],
+    ),
+    authoring = authoring.pass_thru("Facebook ORAM Authors <no-reply@github.com>"),
+    transformations = [
+        core.move("", "google3/third_party/rust/oram/v0_2"),
+    ],
+)

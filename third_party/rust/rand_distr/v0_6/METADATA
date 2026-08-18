@@ -1,0 +1,24 @@
+# proto-file: devtools/metadata/metadata.proto
+# proto-message: MetaData
+name: "rand_distr"
+description: "Sampling from random number distributions"
+third_party {
+  version: "0.6.0"
+  last_upgrade_date {
+    year: 2026
+    month: 7
+    day: 14
+  }
+  identifier: {
+    type: "crates.io"
+    value: "rand_distr"
+    version: "0.6.0"
+    primary_source: true
+  }
+  identifier: {
+    type: "Git"
+    value: "https://github.com/rust-random/rand_distr"
+    version: "61d08aa933df68cf8004aa919ed608809be0f4b1"
+    closest_version: "0.6.0"
+  }
+}

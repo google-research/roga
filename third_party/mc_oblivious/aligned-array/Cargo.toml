@@ -1,0 +1,14 @@
+[package]
+authors = ["Jorge Aparicio <jorge@japaric.io>", "Chris Beck <chris@mobilecoin.com>"]
+categories = ["embedded", "memory-management", "no-std"]
+description = "A newtype with alignment of at least `A` bytes"
+edition = "2018"
+keywords = ["alignment", "aligned", "array", "static"]
+license = "MIT OR Apache-2.0"
+name = "aligned-array"
+repository = "https://github.com/mobilecoinofficial/aligned-array"
+version = "1.0.1"
+
+[dependencies]
+generic-array = { version = "0.14", default-features = false }
+subtle = { version = "2.4", default-features = false, optional = true }

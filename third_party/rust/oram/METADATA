@@ -1,0 +1,14 @@
+# proto-file: devtools/metadata/metadata.proto
+# proto-message: MetaData
+name: "oram"
+
+description: "An implementation of Oblivious RAM."
+
+third_party {
+  type: VERSIONS
+  one_version_exceptions {
+    type: PERMANENT
+    approval: "b/366005558"
+    max_count: 3
+  }
+}

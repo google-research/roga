@@ -1,0 +1,21 @@
+[package]
+name = "mc-oblivious-traits"
+version = "2.3.0"
+description = "Traits and interfaces for components related to Oblivious data structures"
+authors = ["MobileCoin"]
+license = "GPL-3.0"
+edition = "2018"
+readme = "README.md"
+repository = "https://github.com/mobilecoinofficial/mc-oblivious"
+keywords = ["cryptography", "crypto", "constant-time", "oblivious-ram"]
+categories = ["cryptography", "data-structures", "no-std"]
+
+[features]
+no_asm_insecure = ["aligned-cmov/no_asm_insecure"]
+
+[dependencies]
+aligned-cmov = { path = "../aligned-cmov", version = "2.3" }
+balanced-tree-index = { path = "../balanced-tree-index", version = "2.3" }
+
+# third party
+rand_core = { version = "0.6", default-features = false }

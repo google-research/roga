@@ -1,0 +1,20 @@
+include "third_party/rust_toolchain/common_shared_3p_blueprint_information.ncl";
+include "devtools/blueprint/bluze/public/bluze.ncl";
+include bytes "third_party/rust/oram/bluze.textproto" as textproto;
+
+// See go/bluze/guide before editing. To check the generated final blueprint run
+// rncl third_party/rust/oram/third_party.rust.oram.blueprint printproto blueprint_file
+
+blueprint_file = ::bluze::BlueprintFile(
+  textproto,
+
+  project_name = "third_party.rust.oram",
+  teams_product_id = common::team_id,
+  tech_lead = common::tech_lead,
+  dev_mailing_list = common::dev_mailing_list,
+  mdb_groups = common::mdb_groups,
+  buganizer_component_ids = common::buganizer_component_ids,
+  metadata_path = "//depot/google3/third_party/rust/oram/METADATA",
+
+// Customize your blueprint here: go/blueprint/howto-write.
+);

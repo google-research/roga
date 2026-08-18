@@ -1,0 +1,6 @@
+[workspace]
+members = [
+    "crates/oram",
+    "crates/oram-benchmarks",
+]
+resolver = "2"

@@ -1,0 +1,23 @@
+# proto-file: devtools/metadata/metadata.proto
+# proto-message: MetaData
+name: "assume"
+description: "Macro for stating unsafe assumptions in Rust."
+third_party {
+  version: "0.5.0"
+  last_upgrade_date {
+    year: 2026
+    month: 7
+    day: 14
+  }
+  identifier: {
+    type: "crates.io"
+    value: "assume"
+    version: "0.5.0"
+    primary_source: true
+  }
+  identifier: {
+    type: "Git"
+    value: "https://github.com/nicholasgorski/assume"
+    version: "14a27ee530e9fbd30825b5d520d9d7febcc7bcb7"
+  }
+}

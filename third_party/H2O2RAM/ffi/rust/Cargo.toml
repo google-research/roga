@@ -1,0 +1,9 @@
+[package]
+name = "h2o2ram"
+version = "0.1.0"
+edition = "2021"
+description = "Rust bindings for the H2O2RAM oblivious map"
+license = "MIT"
+
+[build-dependencies]
+cmake = "0.1"

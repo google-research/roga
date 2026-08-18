@@ -1,0 +1,7 @@
+load("//devtools/copybara/library/rust", "crate_to_third_party", "google3_import_config")
+
+crate_to_third_party(
+    crate_name = "assume",
+    version = "0.5",
+    google3_import_config = google3_import_config(),
+)

@@ -1,0 +1,16 @@
+# Bug component: lukasgerlach
+name: "osam-histogramm"
+description:
+  "Resizable oblivious histogram with PRF-derived keyed routing "
+  "and parallel multi-copy sharding."
+
+third_party {
+  identifier {
+    type: "Github"
+    value: "https://github.com/facebook/oram"
+  }
+  version: "0505e9c"
+  last_upgrade_date { year: 2025 month: 1 day: 1 }
+  license_type: PERMISSIVE
+  license_note: "Dual MIT/Apache-2.0 from original Meta fork"
+}

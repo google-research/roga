@@ -1,0 +1,172 @@
+#pragma once
+#include "odsl/omap.hpp"
+#include "omap_generic_interface.hpp"
+
+template <uint64_t key_size, uint64_t val_size>
+using MapGenericType = ODSL::OMap<Bytes<key_size>, Bytes<val_size>, uint32_t>;
+
+template <uint64_t key_size, uint64_t val_size>
+using InitializerGenericType =
+    typename MapGenericType<key_size, val_size>::InitContext;
+
+#define MapType MapGenericType<key_size, val_size>
+#define InitializerType InitializerGenericType<key_size, val_size>
+
+#if __cpp_exceptions || defined(__EXCEPTIONS)
+#define OMAP_TRY try {
+#define OMAP_CATCH(msg)                                    \
+  }                                                        \
+  catch (const std::exception& e) {                        \
+    printf("Caught exception in %s: %s\n", msg, e.what()); \
+  }
+#else
+#define OMAP_TRY {
+#define OMAP_CATCH(msg) }
+#endif
+
+template <uint64_t key_size, uint64_t val_size>
+OMapGenericBinding<key_size, val_size>::OMapGenericBinding() {
+  omap = nullptr;
+  initializer = nullptr;
+}
+
+template <uint64_t key_size, uint64_t val_size>
+void OMapGenericBinding<key_size, val_size>::InitEmpty(uint32_t size) {
+  omap = (void*)(new MapType(size));
+  initializer = nullptr;
+  ((MapType*)omap)->Init();
+}
+
+template <uint64_t key_size, uint64_t val_size>
+void OMapGenericBinding<key_size, val_size>::InitEmptyExternal(
+    uint32_t size, uint64_t cacheBytes) {
+  omap = (void*)(new MapType(size, cacheBytes));
+  initializer = nullptr;
+  ((MapType*)omap)->Init();
+}
+
+template <uint64_t key_size, uint64_t val_size>
+void OMapGenericBinding<key_size, val_size>::StartInit(uint32_t size) {
+  OMAP_TRY
+  omap = (void*)(new MapType(size));
+  initializer = (void*)(((MapType*)omap)->NewInitContext());
+  OMAP_CATCH("StartInit")
+}
+
+template <uint64_t key_size, uint64_t val_size>
+void OMapGenericBinding<key_size, val_size>::StartInitExternal(
+    uint32_t size, uint64_t cacheBytes) {
+  OMAP_TRY
+  omap = (void*)(new MapType(size, cacheBytes));
+  initializer = (void*)(((MapType*)omap)->NewInitContext());
+  OMAP_CATCH("StartInitExternal")
+}
+
+template <uint64_t key_size, uint64_t val_size>
+void OMapGenericBinding<key_size, val_size>::FinishInit() {
+  Assert(initializer, "FinishInit without StartInit");
+  OMAP_TRY((InitializerType*)initializer)->Finalize();
+  delete (InitializerType*)initializer;
+  initializer = nullptr;
+  OMAP_CATCH("FinishInit")
+}
+
+template <uint64_t key_size, uint64_t val_size>
+bool OMapGenericBinding<key_size, val_size>::Insert(const void* keyPtr,
+                                                    const void* valPtr) {
+  Bytes<key_size> key(keyPtr);
+  Bytes<val_size> val(valPtr);
+  if (initializer) {
+    OMAP_TRY((InitializerType*)initializer)->Insert(key, val);
+    OMAP_CATCH("Insert (during initialization)")
+    return false;
+  }
+  if (!omap) {
+    printf("Insert: omap is null\n");
+    return false;
+  }
+  OMAP_TRY
+  return ((MapType*)omap)->Insert(key, val);
+  OMAP_CATCH("Insert")
+  return false;
+}
+
+template <uint64_t key_size, uint64_t val_size>
+bool OMapGenericBinding<key_size, val_size>::OInsert(const void* keyPtr,
+                                                     const void* valPtr) {
+  Bytes<key_size> key(keyPtr);
+  Bytes<val_size> val(valPtr);
+  if (initializer) {
+    ((InitializerType*)initializer)->Insert(key, val);
+    return false;
+  }
+  if (!omap) {
+    printf("OInsert: omap is null\n");
+    return false;
+  }
+  OMAP_TRY
+  return ((MapType*)omap)->OInsert(key, val);
+  OMAP_CATCH("OInsert")
+  return false;
+}
+
+template <uint64_t key_size, uint64_t val_size>
+bool OMapGenericBinding<key_size, val_size>::Find(const void* keyPtr,
+                                                  void* valPtr) {
+  Bytes<key_size> key(keyPtr);
+  Bytes<val_size> val(valPtr);
+  Assert(!initializer, "Find during initialization");
+  if (!omap) {
+    printf("Find: omap is null\n");
+    return false;
+  }
+  OMAP_TRY
+  bool found = ((MapType*)omap)->Find(key, val);
+  memcpy(valPtr, val.GetData(), val_size);
+  return found;
+  OMAP_CATCH("Find")
+  return false;
+}
+
+template <uint64_t key_size, uint64_t val_size>
+bool OMapGenericBinding<key_size, val_size>::Erase(const void* keyPtr) {
+  Assert(!initializer, "Erase during initialization");
+  Bytes<key_size> key(keyPtr);
+  if (!omap) {
+    printf("Erase: omap is null\n");
+    return false;
+  }
+  OMAP_TRY
+  return ((MapType*)omap)->Erase(key);
+  OMAP_CATCH("Erase")
+  return false;
+}
+
+template <uint64_t key_size, uint64_t val_size>
+bool OMapGenericBinding<key_size, val_size>::OErase(const void* keyPtr) {
+  Assert(!initializer, "Erase during initialization");
+  if (!omap) {
+    printf("OErase: omap is null\n");
+    return false;
+  }
+  OMAP_TRY
+  Bytes<key_size> key(keyPtr);
+  return ((MapType*)omap)->OErase(key);
+  OMAP_CATCH("OErase")
+  return false;
+}
+
+template <uint64_t key_size, uint64_t val_size>
+void OMapGenericBinding<key_size, val_size>::Destroy() {
+  if (omap) {
+    delete (MapType*)omap;
+  }
+  if (initializer) {
+    delete (InitializerType*)initializer;
+  }
+}
+
+template <uint64_t key_size, uint64_t val_size>
+OMapGenericBinding<key_size, val_size>::~OMapGenericBinding() {
+  Destroy();
+}

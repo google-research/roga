@@ -1,0 +1,14 @@
+load("//devtools/copybara/library/rust", "crate_to_third_party", "google3_import_buildozer_cmd", "google3_import_config")
+
+crate_to_third_party(
+    crate_name = "rand_distr",
+    version = "0.6",
+    google3_import_config = google3_import_config(
+        buildozer = [
+            google3_import_buildozer_cmd(
+                subject = "%rust_library",
+                command = "add compatible_with //buildenv/target:non_prod",
+            ),
+        ],
+    ),
+)
