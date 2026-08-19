@@ -17,12 +17,13 @@ libc = "0.2"
 pcap = "2"
 etherparse = "0.18"
 facebook_oram = { git = "https://github.com/facebook/oram.git", package = "oram", rev = "0505e9c169653b754a9a548090ec494cc167b444", optional = true }
+h2o2ram_oram = { package = "h2o2ram", path = "../../third_party/H2O2RAM/ffi/rust", optional = true }
 
 [features]
 default = []
 profile = ["oram/profile"]
 facebook-baseline = ["dep:facebook_oram"]
-h2o2ram-baseline = []
+h2o2ram-baseline = ["dep:h2o2ram_oram"]
 obliviouslabs-baseline = []
 mc-oblivious-baseline = []
 
@@ -40,3 +41,8 @@ path = "benches/case_study_sim.rs"
 name = "mawi_replay"
 harness = false
 path = "benches/mawi_replay.rs"
+
+[[bench]]
+name = "microbench"
+harness = false
+path = "benches/microbench.rs"

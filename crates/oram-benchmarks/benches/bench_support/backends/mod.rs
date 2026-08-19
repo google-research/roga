@@ -31,100 +31,84 @@ use crate::bench_support::interface::OramBenchBackend;
 use oram::{ObliviousHistogram, ShardedObliviousHistogram};
 use rand::{rngs::StdRng, SeedableRng};
 
-/// Expands supported bucket capacities (`Z` in 4, 8, 16, 32, 64) at compile time to satisfy const generics.
-macro_rules! match_z {
-    ($z:expr, $mac:ident) => {
-        match $z {
-            4 => $mac!(4),
-            8 => $mac!(8),
-            16 => $mac!(16),
-            32 => $mac!(32),
-            64 => $mac!(64),
-            _ => return Err(format!("Unsupported Z={}", $z)),
-        }
-    };
-    ($z:expr, $mac:ident, $($args:tt)*) => {
-        match $z {
-            4 => $mac!(4, $($args)*),
-            8 => $mac!(8, $($args)*),
-            16 => $mac!(16, $($args)*),
-            32 => $mac!(32, $($args)*),
-            64 => $mac!(64, $($args)*),
-            _ => return Err(format!("Unsupported Z={}", $z)),
-        }
-    };
-}
+/// Expands supported (Z, A, S) configurations for `oram-fixed` to satisfy const generics
+/// for `ZaSweep` and standard benchmarks without exploding the Cartesian product.
+macro_rules! match_fixed_z_a_s {
+    ($z:expr, $a:expr, $s:expr, $mac:ident) => {
+        match ($z, $a, $s) {
+            // Z = 4 (for ZaSweep)
+            (4, 2, 256) => Ok($mac!(4, 2, 256)),
+            (4, 3, 256) => Ok($mac!(4, 3, 256)),
+            (4, 4, 256) => Ok($mac!(4, 4, 256)),
+            (4, 5, 256) => Ok($mac!(4, 5, 256)),
+            (4, 6, 256) => Ok($mac!(4, 6, 256)),
+            (4, 7, 256) => Ok($mac!(4, 7, 256)),
+            (4, 8, 256) => Ok($mac!(4, 8, 256)),
+            (4, 9, 256) => Ok($mac!(4, 9, 256)),
+            (4, 10, 256) => Ok($mac!(4, 10, 256)),
 
-macro_rules! match_a {
-    ($a:expr, $mac:ident, $($args:tt)*) => {
-        match $a {
-            2 => $mac!(2, $($args)*),
-            3 => $mac!(3, $($args)*),
-            4 => $mac!(4, $($args)*),
-            5 => $mac!(5, $($args)*),
-            6 => $mac!(6, $($args)*),
-            7 => $mac!(7, $($args)*),
-            8 => $mac!(8, $($args)*),
-            9 => $mac!(9, $($args)*),
-            10 => $mac!(10, $($args)*),
-            11 => $mac!(11, $($args)*),
-            12 => $mac!(12, $($args)*),
-            13 => $mac!(13, $($args)*),
-            14 => $mac!(14, $($args)*),
-            15 => $mac!(15, $($args)*),
-            16 => $mac!(16, $($args)*),
-            18 => $mac!(18, $($args)*),
-            20 => $mac!(20, $($args)*),
-            22 => $mac!(22, $($args)*),
-            24 => $mac!(24, $($args)*),
-            26 => $mac!(26, $($args)*),
-            28 => $mac!(28, $($args)*),
-            30 => $mac!(30, $($args)*),
-            32 => $mac!(32, $($args)*),
-            36 => $mac!(36, $($args)*),
-            40 => $mac!(40, $($args)*),
-            44 => $mac!(44, $($args)*),
-            48 => $mac!(48, $($args)*),
-            52 => $mac!(52, $($args)*),
-            56 => $mac!(56, $($args)*),
-            60 => $mac!(60, $($args)*),
-            64 => $mac!(64, $($args)*),
-            72 => $mac!(72, $($args)*),
-            80 => $mac!(80, $($args)*),
-            _ => return Err(format!("Unsupported A={}", $a)),
+            // Z = 8 (for ZaSweep)
+            (8, 4, 256) => Ok($mac!(8, 4, 256)),
+            (8, 5, 256) => Ok($mac!(8, 5, 256)),
+            (8, 6, 256) => Ok($mac!(8, 6, 256)),
+            (8, 7, 256) => Ok($mac!(8, 7, 256)),
+            (8, 8, 256) => Ok($mac!(8, 8, 256)),
+            (8, 9, 256) => Ok($mac!(8, 9, 256)),
+            (8, 10, 256) => Ok($mac!(8, 10, 256)),
+            (8, 11, 256) => Ok($mac!(8, 11, 256)),
+            (8, 12, 256) => Ok($mac!(8, 12, 256)),
+            (8, 13, 256) => Ok($mac!(8, 13, 256)),
+            (8, 14, 256) => Ok($mac!(8, 14, 256)),
+            (8, 15, 256) => Ok($mac!(8, 15, 256)),
+            (8, 16, 256) => Ok($mac!(8, 16, 256)),
+
+            // Z = 16 (for ZaSweep + standard benchmarks)
+            (16, 8, 256) => Ok($mac!(16, 8, 256)),
+            (16, 10, 256) => Ok($mac!(16, 10, 256)),
+            (16, 12, 256) => Ok($mac!(16, 12, 256)),
+            (16, 14, 256) => Ok($mac!(16, 14, 256)),
+            (16, 16, 256) => Ok($mac!(16, 16, 256)),
+            (16, 18, 256) => Ok($mac!(16, 18, 256)),
+            (16, 20, 256) => Ok($mac!(16, 20, 256)),
+            (16, 20, 64) => Ok($mac!(16, 20, 64)),
+            (16, 22, 256) => Ok($mac!(16, 22, 256)),
+            (16, 24, 256) => Ok($mac!(16, 24, 256)),
+            (16, 26, 256) => Ok($mac!(16, 26, 256)),
+            (16, 28, 256) => Ok($mac!(16, 28, 256)),
+            (16, 30, 256) => Ok($mac!(16, 30, 256)),
+            (16, 32, 256) => Ok($mac!(16, 32, 256)),
+            (16, 36, 256) => Ok($mac!(16, 36, 256)),
+            (16, 40, 256) => Ok($mac!(16, 40, 256)),
+
+            // Z = 32 (for ZaSweep)
+            (32, 16, 256) => Ok($mac!(32, 16, 256)),
+            (32, 20, 256) => Ok($mac!(32, 20, 256)),
+            (32, 24, 256) => Ok($mac!(32, 24, 256)),
+            (32, 28, 256) => Ok($mac!(32, 28, 256)),
+            (32, 32, 256) => Ok($mac!(32, 32, 256)),
+            (32, 36, 256) => Ok($mac!(32, 36, 256)),
+            (32, 40, 256) => Ok($mac!(32, 40, 256)),
+            (32, 44, 256) => Ok($mac!(32, 44, 256)),
+            (32, 48, 256) => Ok($mac!(32, 48, 256)),
+            (32, 52, 256) => Ok($mac!(32, 52, 256)),
+            (32, 56, 256) => Ok($mac!(32, 56, 256)),
+            (32, 60, 256) => Ok($mac!(32, 60, 256)),
+            (32, 64, 256) => Ok($mac!(32, 64, 256)),
+            (32, 72, 256) => Ok($mac!(32, 72, 256)),
+            (32, 80, 256) => Ok($mac!(32, 80, 256)),
+
+            // Z = 64 (Canonical & SOTA)
+            (64, 20, 256) => Ok($mac!(64, 20, 256)),
+            (64, 20, 64) => Ok($mac!(64, 20, 64)),
+            (64, 16, 64) => Ok($mac!(64, 16, 64)),
+            (64, 16, 256) => Ok($mac!(64, 16, 256)),
+
+            _ => Err(format!(
+                "Unsupported (Z={}, A={}, S={}) for oram-fixed. See ZaSweep and canonical benchmarks for supported configurations.",
+                $z, $a, $s
+            )),
         }
     };
-}
-
-macro_rules! match_s {
-    ($s:expr, $mac:ident, $($args:tt)*) => {
-        match $s {
-            64 => $mac!(64, $($args)*),
-            256 => $mac!(256, $($args)*),
-            _ => return Err(format!("Unsupported S={}", $s)),
-        }
-    };
-}
-
-macro_rules! match_z_a_s {
-    ($z:expr, $a:expr, $s:expr, $mac:ident) => {{
-        macro_rules! dispatch_s {
-            ($s_val:expr, $z_val:expr, $a_val:expr) => {
-                $mac!($z_val, $a_val, $s_val)
-            };
-        }
-        macro_rules! dispatch_a {
-            ($a_val:expr, $z_val:expr) => {
-                match_s!($s, dispatch_s, $z_val, $a_val)
-            };
-        }
-        macro_rules! dispatch_z {
-            ($z_val:expr) => {
-                match_a!($a, dispatch_a, $z_val)
-            };
-        }
-        match_z!($z, dispatch_z)
-    }};
 }
 
 /// Instantiates a concrete `OramBenchBackend` trait object based on configuration string and benchmark parameters.
@@ -166,7 +150,7 @@ pub fn create_backend(
                 }};
             }
 
-            Ok(match_z_a_s!(z, a_val, s_val, make_fixed))
+            match_fixed_z_a_s!(z, a_val, s_val, make_fixed)
         }
         "oram-resizing" => {
             let mut rng = StdRng::seed_from_u64(seed ^ 0x0A00_5000);
@@ -182,7 +166,16 @@ pub fn create_backend(
                 }};
             }
 
-            Ok(match_z_a_s!(z, a_val, s_val, make_resizing))
+            match (z, a_val, s_val) {
+                (64, 20, 256) => Ok(make_resizing!(64, 20, 256)),
+                (16, 20, 64) => Ok(make_resizing!(16, 20, 64)),
+                (64, 16, 64) => Ok(make_resizing!(64, 16, 64)),
+                (64, 20, 64) => Ok(make_resizing!(64, 20, 64)),
+                _ => Err(format!(
+                    "Unsupported (Z={}, A={}, S={}) for oram-resizing; only canonical configurations are compiled.",
+                    z, a_val, s_val
+                )),
+            }
         }
         #[cfg(feature = "facebook-baseline")]
         "facebook-oram" => {
@@ -221,7 +214,16 @@ pub fn create_backend(
                 }};
             }
 
-            Ok(match_z_a_s!(z, a_val, s_val, make_sharded))
+            match (z, a_val, s_val) {
+                (64, 20, 256) => Ok(make_sharded!(64, 20, 256)),
+                (16, 20, 64) => Ok(make_sharded!(16, 20, 64)),
+                (64, 16, 64) => Ok(make_sharded!(64, 16, 64)),
+                (64, 20, 64) => Ok(make_sharded!(64, 20, 64)),
+                _ => Err(format!(
+                    "Unsupported (Z={}, A={}, S={}) for sharded-oram; only canonical configurations are compiled.",
+                    z, a_val, s_val
+                )),
+            }
         }
         "sharded-oram-resizing" => {
             let shard_count = (cores * 2).min(64).max(4);
@@ -264,7 +266,16 @@ pub fn create_backend(
                 }};
             }
 
-            Ok(match_z_a_s!(z, a_val, s_val, make_sharded_resizing))
+            match (z, a_val, s_val) {
+                (64, 20, 256) => Ok(make_sharded_resizing!(64, 20, 256)),
+                (16, 20, 64) => Ok(make_sharded_resizing!(16, 20, 64)),
+                (64, 16, 64) => Ok(make_sharded_resizing!(64, 16, 64)),
+                (64, 20, 64) => Ok(make_sharded_resizing!(64, 20, 64)),
+                _ => Err(format!(
+                    "Unsupported (Z={}, A={}, S={}) for sharded-oram-resizing; only canonical configurations are compiled.",
+                    z, a_val, s_val
+                )),
+            }
         }
         #[cfg(feature = "h2o2ram-baseline")]
         "h2o2ram-oram" => {

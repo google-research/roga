@@ -39,7 +39,26 @@ pub fn binom_pmf(n: usize, k: usize, p: f64) -> f64 {
 }
 
 pub fn binom_cdf(n: usize, k: usize, p: f64) -> f64 {
-    (0..=k.min(n)).map(|i| binom_pmf(n, i, p)).sum::<f64>().min(1.0)
+    let k = k.min(n);
+    if p >= 1.0 {
+        return if k == n { 1.0 } else { 0.0 };
+    }
+    if p <= 0.0 {
+        return 1.0;
+    }
+    let n_f = n as f64;
+    let ln_gamma_n_plus_1 = ln_gamma(n_f + 1.0);
+    let ln_p = p.ln();
+    let ln_1_minus_p = (1.0 - p).ln();
+
+    (0..=k)
+        .map(|i| {
+            let i_f = i as f64;
+            let ln_comb = ln_gamma_n_plus_1 - ln_gamma(i_f + 1.0) - ln_gamma(n_f - i_f + 1.0);
+            (ln_comb + i_f * ln_p + (n_f - i_f) * ln_1_minus_p).exp()
+        })
+        .sum::<f64>()
+        .min(1.0)
 }
 
 pub fn binom_sf(n: usize, k: usize, p: f64) -> f64 {
@@ -59,9 +78,17 @@ pub fn suggested_per_shard_quota(
 ) -> usize {
     let p = 1.0 / (shard_count as f64);
     let target = 2.0f64.powi(-(security_bits as i32)) * p;
-    (batch_size / shard_count..=batch_size)
-        .find(|&q| binom_sf(batch_size, q, p) <= target)
-        .unwrap_or(batch_size)
+    let mut low = batch_size / shard_count;
+    let mut high = batch_size;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if binom_sf(batch_size, mid, p) <= target {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    low
 }
 
 pub fn binom_ppf(n: usize, p: f64, alpha: f64) -> usize {
@@ -94,10 +121,17 @@ pub fn shard_coordination_slack(
     let p = 1.0 / m;
     let total_n = per_shard_capacity * shard_count;
     let target = 2.0f64.powi(-(security_bits as i32)) * p;
-    let q = (per_shard_capacity..=total_n)
-        .find(|&q| binom_sf(total_n, q, p) <= target)
-        .unwrap_or(per_shard_capacity);
-    q.saturating_sub(per_shard_capacity)
+    let mut low = per_shard_capacity;
+    let mut high = total_n;
+    while low < high {
+        let mid = low + (high - low) / 2;
+        if binom_sf(total_n, mid, p) <= target {
+            high = mid;
+        } else {
+            low = mid + 1;
+        }
+    }
+    low.saturating_sub(per_shard_capacity)
 }
 
 #[cfg(test)]
@@ -106,24 +140,9 @@ mod tests {
 
     #[test]
     fn test_boundary_p_equals_one() {
-        println!("binom_pmf(16, 16, 1.0) = {}", binom_pmf(16, 16, 1.0));
-        println!("binom_pmf(16, 15, 1.0) = {}", binom_pmf(16, 15, 1.0));
+        assert_eq!(binom_pmf(16, 16, 1.0), 1.0);
+        assert_eq!(binom_pmf(16, 15, 1.0), 0.0);
         let res = dp_det_threshold(64.0, 16.0, 16.0, 0.05, 1.0);
-        println!("dp_det_threshold(64, 16, 16, 0.05, 1.0) = {res}");
         assert!(!res.is_nan(), "dp_det_threshold produced NaN for p=1.0!");
-    }
-
-    #[test]
-    fn test_solver_performance_ranges() {
-        let start = std::time::Instant::now();
-        let res_med = dp_det_threshold(65536.0, 16384.0, 1024.0, 0.05, 1.0);
-        println!("dp_det_threshold(65536) = {res_med} (took {:?})", start.elapsed());
-
-        let start_quota = std::time::Instant::now();
-        let q = suggested_per_shard_quota(65536, 16, 80);
-        println!(
-            "suggested_per_shard_quota(65536, 16, 80) = {q} (took {:?})",
-            start_quota.elapsed()
-        );
     }
 }

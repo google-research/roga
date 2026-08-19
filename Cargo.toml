@@ -2,5 +2,6 @@
 members = [
     "crates/oram",
     "crates/oram-benchmarks",
+    "third_party/H2O2RAM/ffi/rust",
 ]
 resolver = "2"

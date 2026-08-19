@@ -22,7 +22,6 @@ profile = []
 
 [dev-dependencies]
 rand = "0.10"
-memmap2 = "0.9"
 
 [profile.profiling]
 inherits = "release"

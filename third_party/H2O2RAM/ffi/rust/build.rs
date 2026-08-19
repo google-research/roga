@@ -11,8 +11,8 @@ fn param(name: &str, default: &str) -> usize {
 }
 
 fn main() {
-    let key_max = param("H2O2RAM_KEY_MAX", "32");
-    let val_size = param("H2O2RAM_VAL_SIZE", "32");
+    let key_max = param("H2O2RAM_KEY_MAX", "16");
+    let val_size = param("H2O2RAM_VAL_SIZE", "8");
     let capacity = param("H2O2RAM_CAPACITY", "65536");
 
     if (key_max + val_size) % 8 != 0 {
@@ -46,6 +46,7 @@ fn main() {
         .define("H2O2RAM_KEY_MAX", key_max.to_string())
         .define("H2O2RAM_VAL_SIZE", val_size.to_string())
         .define("H2O2RAM_CAPACITY", capacity.to_string())
+        .cxxflag("-I/usr/include")
         .build();
 
     println!("cargo:rustc-link-search=native={}/lib", dst.display());

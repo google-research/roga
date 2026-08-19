@@ -31,15 +31,10 @@ impl Experiment for FixedScaling {
     fn run(&self, reporter: &mut BenchmarkReporter) {
         let capacities = [
             1 << 16,
-            1 << 17,
             1 << 18,
-            1 << 19,
             1 << 20,
-            1 << 21,
             1 << 22,
-            1 << 23,
             1 << 24,
-            1 << 25,
             1 << 26,
         ];
         let distributions = [DistributionKind::Uniform];
@@ -64,14 +59,8 @@ impl Experiment for FixedScaling {
                 let capacity = (capacity_hint as u64).next_power_of_two();
                 let domain_count =
                     usize::try_from(distinct_for_capacity(capacity)).unwrap_or(usize::MAX);
-                // Scale operations dynamically to ensure steady-state evictions at large capacities
-                let ops = if capacity >= (1 << 22) {
-                    200_000usize
-                } else if capacity >= (1 << 18) {
-                    100_000usize
-                } else {
-                    50_000usize
-                };
+                // Run 100,000 operations for fast, responsive head-to-head comparison
+                let ops = 100_000usize;
 
                 for &backend_name in &backends {
                     if (backend_name == "obliviouslabs-oram" || backend_name == "h2o2ram-oram")
@@ -79,8 +68,8 @@ impl Experiment for FixedScaling {
                     {
                         continue;
                     }
-                    // H2O2RAM config table is precomputed up to 2^25 (33554432)
-                    if backend_name == "h2o2ram-oram" && capacity > 33554432 {
+                    // H2O2RAM config table is precomputed up to 2^26 (67108864)
+                    if backend_name == "h2o2ram-oram" && capacity > 67108864 {
                         continue;
                     }
 
