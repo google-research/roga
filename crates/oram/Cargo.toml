@@ -1,0 +1,32 @@
+[package]
+name = "oram"
+version = "0.2.0-pre.1"
+rust-version = "1.88"
+edition = "2021"
+description = "Resizable oblivious histogram with PRF-derived keyed routing."
+license = "MIT OR Apache-2.0"
+readme = "../../README.md"
+repository = "https://github.com/s8lvg/oram"
+keywords = ["oram", "osam", "oblivious", "histogram", "cryptography"]
+categories = ["cryptography"]
+
+[dependencies]
+rand = { version = "0.10", features = ["chacha"] }
+rand_chacha = "0.10"
+rayon = "1"
+aes = "0.8"
+cmov = "0.5.4"
+
+[features]
+profile = []
+
+[dev-dependencies]
+rand = "0.10"
+memmap2 = "0.9"
+
+[profile.profiling]
+inherits = "release"
+debug = true
+
+[profile.release]
+debug = "line-tables-only"

@@ -1,0 +1,42 @@
+[package]
+name = "oram-benchmarks"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+oram = { path = "../oram" }
+rayon = "1"
+rand = "0.10"
+rand_distr = "0.6"
+aes = "0.8"
+cmov = "0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+pcap = "2"
+etherparse = "0.18"
+facebook_oram = { git = "https://github.com/facebook/oram.git", package = "oram", rev = "0505e9c169653b754a9a548090ec494cc167b444", optional = true }
+
+[features]
+default = []
+profile = ["oram/profile"]
+facebook-baseline = ["dep:facebook_oram"]
+h2o2ram-baseline = []
+obliviouslabs-baseline = []
+mc-oblivious-baseline = []
+
+[[bench]]
+name = "oram_benchmarks"
+harness = false
+path = "benches/oram_benchmarks.rs"
+
+[[bench]]
+name = "case_study_sim"
+harness = false
+path = "benches/case_study_sim.rs"
+
+[[bench]]
+name = "mawi_replay"
+harness = false
+path = "benches/mawi_replay.rs"
