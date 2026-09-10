@@ -470,7 +470,85 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
         result
     }
 
-    /// Extracts all raw entries across all shards in parallel, merging duplicate keys ($O(N \log N)$).
+    /// Returns the public, fixed number of slots emitted by [`Self::readout`] ($O(M)$).
+    pub fn readout_len(&self) -> usize {
+        self.router.shards.iter().map(ObliviousHistogram::readout_len).sum()
+    }
+
+    /// Performs a fixed-length bulk readout across every shard ($O((N/M) \log^2(N/M))$ parallel).
+    ///
+    /// Pending updates are flushed first. Each shard scans, sorts, merges, and
+    /// compacts its complete public-capacity state in parallel. A final oblivious
+    /// compaction moves all real records into one prefix without revealing how
+    /// many there are. The returned array always has [`Self::readout_len`] slots.
+    /// A CVM integration must encrypt the entire array before releasing it.
+    pub fn readout(&mut self) -> Vec<OramBlock<K, V>> {
+        self.flush();
+        let shard_results: Vec<Vec<OramBlock<K, V>>> =
+            self.router.shards.par_iter().map(ObliviousHistogram::readout).collect();
+        let mut result: Vec<OramBlock<K, V>> = shard_results.into_iter().flatten().collect();
+
+        let mut marks = Vec::with_capacity(result.len() + 1);
+        crate::oblivious::compaction::compact_marks(&result, &mut marks);
+        crate::oblivious::compaction::compact_payload(&mut result, &marks);
+        result
+    }
+
+    /// Performs the exact tree-aware bulk readout across all shards.
+    ///
+    /// Shards have disjoint PRF routing ranges, so their fixed-length outputs
+    /// can be concatenated without a global sort or compaction. Dummy records
+    /// may be interspersed and must be discarded by the encrypted recipient.
+    pub fn readout_tree_aware(&mut self) -> Vec<OramBlock<K, V>> {
+        self.flush();
+        let per_shard_len = self.router.shards.first().map_or(0, ObliviousHistogram::readout_len);
+        assert!(
+            self.router.shards.iter().all(|shard| shard.readout_len() == per_shard_len),
+            "coordinated shards must have equal public readout lengths"
+        );
+
+        let mut result = vec![OramBlock::dummy(); per_shard_len * self.router.shards.len()];
+        result
+            .par_chunks_mut(per_shard_len)
+            .zip(self.router.shards.par_iter())
+            .for_each(|(output, shard)| shard.readout_tree_aware_into(output));
+        result
+    }
+
+    /// Consumes the sharded histogram and emits one fixed-length subtree-partitioned
+    /// shard result at a time.
+    ///
+    /// Shards are processed sequentially to bound peak memory, while the independent
+    /// lower subtrees inside the active shard still use the global Rayon worker pool.
+    /// The callback must encrypt or otherwise consume the complete slice, including
+    /// dummy records, before it returns; the allocation is released immediately after.
+    /// Earlier shards may already have been emitted if a later shard reports an inbox
+    /// overflow.
+    pub fn into_readout_subtree_partitioned<F>(
+        mut self,
+        local_height: u64,
+        security_bits: usize,
+        mut emit_shard: F,
+    ) -> Result<(), crate::SubtreeReadoutOverflow>
+    where
+        F: FnMut(usize, &[OramBlock<K, V>]),
+    {
+        self.flush();
+        let shards = std::mem::take(&mut self.router.shards);
+        drop(self);
+
+        for (shard_index, shard) in shards.into_iter().enumerate() {
+            let output = shard.readout_subtree_partitioned(local_height, security_bits)?;
+            drop(shard);
+            emit_shard(shard_index, &output);
+        }
+        Ok(())
+    }
+
+    /// Diagnostic, non-oblivious export of only the real records.
+    ///
+    /// This compatibility helper leaks the distinct-key count. Security-sensitive
+    /// callers must use [`Self::readout`] instead.
     pub fn export_entries(&mut self) -> Vec<(u64, [u8; K], V)> {
         self.flush();
         let shard_results: Vec<Vec<ExportedEntry<K, V>>> =
@@ -489,11 +567,11 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
         }
     }
 
-    /// Flushes buffered updates to physical ORAM shards and checks deferred auto-resize signals ($O(B \log B / F)$).
+    /// Flushes buffered updates to physical ORAM shards and applies a pending coordinator resize ($O(B \log B / F)$).
     pub fn flush(&mut self) {
         self.router.flush();
 
-        // Deferred auto-resize check
+        // Apply the coordinator's deferred resize signal at the batch synchronization point.
         Self::handle_deferred_resize(
             self.auto_resize,
             &mut self.router.shards,
@@ -524,6 +602,20 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
     }
 }
 
+impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValue> Drop
+    for ShardedObliviousHistogram<Z, K, A, S, V>
+{
+    fn drop(&mut self) {
+        if !self.router.pending.is_empty() {
+            if std::thread::panicking() {
+                eprintln!("WARNING: ShardedObliviousHistogram dropped with {} pending updates! Call flush() before dropping to avoid losing data.", self.router.pending.len());
+            } else {
+                panic!("ShardedObliviousHistogram dropped with {} pending updates! Call flush() before dropping to avoid losing data.", self.router.pending.len());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,19 +635,5 @@ mod tests {
 
         assert!(z4.saturating_sub(z64 * 16) < 16);
         assert_eq!(z64, 297);
-    }
-}
-
-impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValue> Drop
-    for ShardedObliviousHistogram<Z, K, A, S, V>
-{
-    fn drop(&mut self) {
-        if !self.router.pending.is_empty() {
-            if std::thread::panicking() {
-                eprintln!("WARNING: ShardedObliviousHistogram dropped with {} pending updates! Call flush() before dropping to avoid losing data.", self.router.pending.len());
-            } else {
-                panic!("ShardedObliviousHistogram dropped with {} pending updates! Call flush() before dropping to avoid losing data.", self.router.pending.len());
-            }
-        }
     }
 }

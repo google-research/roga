@@ -242,3 +242,81 @@ fn deferred_auto_resize_grows_all_shards_and_preserves_counts() {
         assert_eq!(hist.read_total(format!("auto_{i}").as_bytes()), 1);
     }
 }
+
+#[test]
+fn sharded_bulk_readout_flushes_and_returns_one_fixed_real_prefix() {
+    let mut rng = StdRng::seed_from_u64(9020);
+    let mut hist = ShardedObliviousHistogram::<4, 16, 4, 64>::new_with_frontends(
+        2,
+        512,
+        32,
+        32,
+        1,
+        &mut rng,
+    );
+    let output_len = hist.readout_len();
+
+    for round in 0..5u64 {
+        for key in 0..12u128 {
+            hist.append(&key.to_be_bytes(), round + 1);
+        }
+    }
+
+    // The final partial batch is deliberately still pending here. readout() must flush it.
+    let output = hist.readout();
+    assert_eq!(output.len(), output_len);
+    let real_len = output.iter().take_while(|block| block.tag != 0).count();
+    assert_eq!(real_len, 12);
+    assert!(output[real_len..].iter().all(|block| block.tag == 0));
+
+    let mut values = std::collections::BTreeMap::new();
+    for block in &output[..real_len] {
+        values.insert(u128::from_be_bytes(block.payload), block.value);
+    }
+    assert_eq!(values.len(), 12);
+    assert!(values.values().all(|&value| value == 15));
+
+    let tree_aware = hist.readout_tree_aware();
+    assert_eq!(tree_aware.len(), output_len);
+    let tree_values: std::collections::BTreeMap<_, _> = tree_aware
+        .iter()
+        .filter(|block| block.tag != 0)
+        .map(|block| (u128::from_be_bytes(block.payload), block.value))
+        .collect();
+    assert_eq!(tree_values, values);
+}
+
+#[test]
+fn consuming_subtree_readout_emits_exact_fixed_shard_outputs() {
+    let mut rng = StdRng::seed_from_u64(9021);
+    let mut hist = ShardedObliviousHistogram::<4, 16, 4, 64>::new_with_frontends(
+        4,
+        4096,
+        64,
+        32,
+        1,
+        &mut rng,
+    );
+    let mut expected = std::collections::BTreeMap::new();
+    for update in 0..701u64 {
+        let key = ((update * 19 + update / 7) % 73) as u128;
+        hist.append(&key.to_be_bytes(), 1);
+        *expected.entry(key).or_insert(0u64) += 1;
+    }
+
+    let mut emitted_shards = 0usize;
+    let mut actual = std::collections::BTreeMap::new();
+    hist.into_readout_subtree_partitioned(3, 80, |shard_index, output| {
+        assert_eq!(shard_index, emitted_shards);
+        emitted_shards += 1;
+        for block in output.iter().filter(|block| block.tag != 0) {
+            assert!(actual
+                .insert(u128::from_be_bytes(block.payload), block.value)
+                .is_none());
+        }
+    })
+    .expect("subtree inbox should satisfy its statistical bound");
+
+    assert_eq!(emitted_shards, 4);
+    assert_eq!(actual, expected);
+}

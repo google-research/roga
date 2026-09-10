@@ -138,7 +138,7 @@ impl<const Z: usize, const A: usize, const S: usize> OramParams for OramConfig<Z
 pub use crate::block::{FlowRecord, OramBlock};
 pub use crate::metrics::{OramMetrics, ShardedOramMetrics};
 pub use crate::oblivious::copy_prefix;
-pub use crate::oblivious_histogram::{AutoResizeConfig, ObliviousHistogram};
+pub use crate::oblivious_histogram::{AutoResizeConfig, ObliviousHistogram, SubtreeReadoutOverflow};
 pub use crate::sharded_oblivious_histogram::router::prepare_key;
 pub use crate::sharded_oblivious_histogram::{
     OramShard, ShardedBatchRouter, ShardedObliviousHistogram,

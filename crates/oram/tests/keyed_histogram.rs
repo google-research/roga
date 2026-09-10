@@ -375,3 +375,78 @@ fn test_resize_no_panic() {
     assert!(h.capacity() > 512);
 }
 
+#[test]
+fn bulk_readout_is_fixed_length_sorted_compacted_and_non_destructive() {
+    let mut rng = StdRng::seed_from_u64(818);
+    let mut h = ObliviousHistogram::<4, 16, 2, 64>::new(128, &mut rng);
+    let empty_len = h.readout_len();
+    assert_eq!(h.readout().len(), empty_len);
+
+    let keys = [9u128, 2, 17, 1, 255, 3];
+    for &key in &[9u128, 2, 17, 9, 1, 255, 2, 3, 9] {
+        h.append(&key.to_be_bytes(), 1);
+    }
+
+    let first = h.readout();
+    assert_eq!(first.len(), empty_len, "the output length must not depend on occupancy");
+
+    let real_len = first.iter().take_while(|block| block.tag != 0).count();
+    assert_eq!(real_len, keys.len());
+    assert!(first[real_len..].iter().all(|block| block.tag == 0));
+    assert!(first[..real_len].windows(2).all(|pair| pair[0].payload <= pair[1].payload));
+
+    let expected = [(1u128, 1u64), (2, 2), (3, 1), (9, 3), (17, 1), (255, 1)];
+    for (block, &(key, value)) in first[..real_len].iter().zip(expected.iter()) {
+        assert_eq!(block.payload, key.to_be_bytes());
+        assert_eq!(block.value, value);
+    }
+
+    assert_eq!(h.readout(), first, "readout must not mutate the histogram");
+    assert_eq!(h.read_total(&9u128.to_be_bytes()), 3);
+}
+
+#[test]
+fn tree_aware_readout_matches_global_sort_with_tree_and_stash_duplicates() {
+    let mut rng = StdRng::seed_from_u64(0x7eae_a11e);
+    let mut h = ObliviousHistogram::<4, 16, 7, 64>::new(256, &mut rng);
+    let mut expected = std::collections::BTreeMap::<[u8; 16], u64>::new();
+
+    // Several eviction cycles create copies at separated tree depths. The
+    // final partial cycle deliberately leaves additional copies in the stash.
+    for i in 0..503u64 {
+        let key = ((i * 17 + (i / 11) * 5) % 43) as u128;
+        let payload = key.to_be_bytes();
+        h.append(&payload, 1);
+        *expected.entry(payload).or_default() += 1;
+    }
+
+    let reference = h.readout();
+    let tree_aware = h.readout_tree_aware();
+    let subtree_partitioned: Vec<_> = [1, 2, 3]
+        .into_iter()
+        .map(|local_height| {
+            h.readout_subtree_partitioned(local_height, 80)
+                .expect("subtree inbox should satisfy its statistical bound")
+        })
+        .collect();
+    assert_eq!(tree_aware.len(), h.readout_len());
+
+    let collect = |blocks: &[oram::OramBlock<16>]| {
+        let mut entries: Vec<([u8; 16], u64)> = blocks
+            .iter()
+            .filter(|block| block.tag != 0)
+            .map(|block| (block.payload, block.value))
+            .collect();
+        entries.sort_by_key(|entry| entry.0);
+        entries
+    };
+
+    let expected_entries: Vec<_> = expected.into_iter().collect();
+    assert_eq!(collect(&reference), expected_entries);
+    assert_eq!(collect(&tree_aware), expected_entries);
+    for output in &subtree_partitioned {
+        assert_eq!(collect(output), expected_entries);
+    }
+    assert_eq!(collect(&h.clone().into_readout_tree_aware()), expected_entries);
+    assert_eq!(h.readout_tree_aware(), tree_aware, "tree-aware readout must remain non-destructive");
+}
