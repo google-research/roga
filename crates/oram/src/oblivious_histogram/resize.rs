@@ -19,119 +19,214 @@ use rand::RngExt;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
 
+use crate::oblivious::ct::ct_lt;
+
 use super::routing::MAX_TREE_HEIGHT;
 use super::tree::{leaf_count, TreeIndex};
 use super::ObliviousHistogram;
 
-/// Differentially private auto-resize configuration parameters ($(\epsilon, \delta)$ privacy).
+/// Precision used for the dyadic approximation of the geometric failure
+/// probability. Leaving sixteen low RNG bits unused makes the integer
+/// threshold exact while keeping the approximation error negligible.
+const SAMPLER_PROBABILITY_BITS: u32 = 48;
+const SAMPLER_PROBABILITY_SCALE: u64 = 1u64 << SAMPLER_PROBABILITY_BITS;
+/// The probability that either fixed-work geometric draw reaches its cap is
+/// bounded by `2^-SAMPLER_STATISTICAL_BITS`.
+const SAMPLER_STATISTICAL_BITS: u32 = 128;
+#[cfg(test)]
+const EPS_ONE_FAILURE_CUTOFF: u64 = 238_263_423_799_583;
+#[cfg(test)]
+const EPS_ONE_TRIALS: usize = 537;
+const RESIZE_ATTEMPTS: u64 = 2;
+#[cfg(test)]
+const EPS_ONE_RANDOM_WORDS: usize = 2 * EPS_ONE_TRIALS;
+
+/// Differentially private auto-resize configuration parameters ($\epsilon$ privacy).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoResizeConfig {
     /// Initial distinct-key capacity estimate for baseline `Z=4` bucket width.
     pub t_capacity: u64,
     /// Differential privacy epsilon parameter ($\epsilon$).
     pub eps: f64,
-    /// Differential privacy delta parameter ($\delta$).
-    pub delta: f64,
     /// Failure probability bound for the Chernoff margin ($\alpha$).
     pub alpha: f64,
-    /// Stream items per flush ($r$).
-    pub r: u64,
-    /// Seed for Laplace-noise RNG generation.
+    /// Seed for discrete-Laplace-noise RNG generation.
     pub seed: u64,
 }
 
 impl AutoResizeConfig {
-    /// Creates a new configuration with default privacy parameters ($\epsilon=1.0, \delta=10^{-6}, \alpha=0.05, r=1$).
+    /// Creates a new configuration with default privacy parameters ($\epsilon=1.0, \alpha=0.05$).
     pub fn new(t_capacity: u64) -> Self {
-        Self { t_capacity, eps: 1.0, delta: 1e-6, alpha: 0.05, r: 1, seed: 0 }
+        Self {
+            t_capacity,
+            eps: 1.0,
+            alpha: 0.05,
+            seed: 0,
+        }
     }
 }
 
 pub(crate) type AutoResizeRng = ChaCha20Rng;
 
+/// Fixed-work sampler for integer-valued two-sided geometric (discrete
+/// Laplace) noise. A sample is the difference of two independent geometric
+/// variables, each evaluated for the same public number of trials.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CtDiscreteLaplace {
+    failure_cutoff: u64,
+    trials: usize,
+}
+
+impl CtDiscreteLaplace {
+    pub(crate) fn new(eps: f64) -> Self {
+        assert!(eps.is_finite() && eps > 0.0, "epsilon must be finite and positive");
+
+        // The target distribution has q = exp(-eps / 6). Round q upward so
+        // the implemented distribution is (very slightly) more private than
+        // requested. Two threshold units cover floating-point rounding in the
+        // public, one-time parameter setup.
+        let target_q = (-eps / 6.0).exp();
+        let scaled_q = target_q * (SAMPLER_PROBABILITY_SCALE as f64);
+        let failure_cutoff = (scaled_q.floor() as u64).saturating_add(2);
+        assert!(
+            failure_cutoff < SAMPLER_PROBABILITY_SCALE,
+            "epsilon is too small for the sampler's probability precision"
+        );
+
+        let q = (failure_cutoff as f64) / (SAMPLER_PROBABILITY_SCALE as f64);
+        debug_assert!(-6.0 * q.ln() <= eps);
+
+        // If G is an uncapped geometric variable, Pr[G >= trials] = q^trials.
+        // A union bound over the two variables makes the statistical distance
+        // introduced by capping at most 2^-128.
+        let target_log_probability = -((SAMPLER_STATISTICAL_BITS + 1) as f64) * core::f64::consts::LN_2;
+        let trials = (target_log_probability / q.ln()).ceil() as usize;
+        assert!(trials > 0, "sampler must perform at least one trial");
+
+        Self { failure_cutoff, trials }
+    }
+
+    #[inline]
+    fn geometric_with(&self, next_word: &mut impl FnMut() -> u64) -> i64 {
+        let mut active = 1u64;
+        let mut magnitude = 0u64;
+
+        for _ in 0..self.trials {
+            let draw = next_word() >> (64 - SAMPLER_PROBABILITY_BITS);
+            active &= ct_lt(draw, self.failure_cutoff) as u64;
+            magnitude = magnitude.wrapping_add(active);
+        }
+
+        magnitude as i64
+    }
+
+    #[inline]
+    pub(crate) fn sample_with(&self, next_word: &mut impl FnMut() -> u64) -> i64 {
+        let positive = self.geometric_with(next_word);
+        let negative = self.geometric_with(next_word);
+        positive.wrapping_sub(negative)
+    }
+
+    pub(crate) fn sample(&self, rng: &mut AutoResizeRng) -> i64 {
+        self.sample_with(&mut || rng.random::<u64>())
+    }
+
+    /// Smallest non-negative integer z whose upper tail satisfies
+    /// `Pr[X > z] <= probability` for the uncapped discrete distribution.
+    fn upper_quantile(&self, probability: f64) -> i64 {
+        assert!(
+            probability.is_finite() && probability > 0.0 && probability < 0.5,
+            "tail probability must be finite and in (0, 0.5)"
+        );
+        let q = (self.failure_cutoff as f64) / (SAMPLER_PROBABILITY_SCALE as f64);
+        let z = ((probability * (1.0 + q)).ln() / q.ln()).ceil() - 1.0;
+        (z.max(0.0) as i64).min(self.trials as i64)
+    }
+
+    #[cfg(test)]
+    fn truncation_bound(&self) -> f64 {
+        let q = (self.failure_cutoff as f64) / (SAMPLER_PROBABILITY_SCALE as f64);
+        2.0 * q.powi(self.trials as i32)
+    }
+
+    #[cfg(test)]
+    fn effective_epsilon(&self) -> f64 {
+        let q = (self.failure_cutoff as f64) / (SAMPLER_PROBABILITY_SCALE as f64);
+        -6.0 * q.ln()
+    }
+}
+
+/// Runs the epsilon-one sampler constants over caller-provided RNG output so
+/// the unit test can compare them with the parameterized production sampler.
+#[cfg(test)]
+fn discrete_laplace_eps_one_from_words(words: &[u64; EPS_ONE_RANDOM_WORDS]) -> i64 {
+    let sampler = CtDiscreteLaplace {
+        failure_cutoff: EPS_ONE_FAILURE_CUTOFF,
+        trials: EPS_ONE_TRIALS,
+    };
+    let mut index = 0usize;
+    sampler.sample_with(&mut || {
+        let word = words[index];
+        index += 1;
+        word
+    })
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct AutoResizeState {
     pub(crate) config: AutoResizeConfig,
     pub(crate) k: u64,
-    pub(crate) t_hat: f64,
-    pub(crate) flushes_since_check: u64,
+    pub(crate) t_hat_units: i64,
+    pub(crate) evictions_since_check: u64,
     pub(crate) c_sum: u64,
-    pub(crate) last_estimate: f64,
     pub(crate) total_resizes: u64,
     pub(crate) deferred: bool,
+    pub(crate) emits_grow_signal: bool,
+    pub(crate) pending_grow: Option<u64>,
+    pub(crate) sampler: CtDiscreteLaplace,
     pub(crate) rng: AutoResizeRng,
 }
 
 impl AutoResizeState {
-    pub(crate) fn record_flush(&mut self, matching_blocks: u64) {
+    pub(crate) fn record_eviction(&mut self, matching_blocks: u64) {
         self.c_sum += matching_blocks;
-        self.flushes_since_check += 1;
+        self.evictions_since_check += 1;
     }
 
     pub(crate) fn should_check_epoch(&self) -> bool {
-        self.flushes_since_check >= self.k
+        (!self.emits_grow_signal || self.pending_grow.is_none()) && self.evictions_since_check >= self.k
     }
 
-    pub(crate) fn evaluate_signal<const Z: usize>(&mut self, height: u64) -> Option<u64> {
-        let l = leaf_count(height);
+    pub(crate) fn evaluate_signal<const Z: usize>(&mut self, _height: u64) -> Option<u64> {
         let effective_t = effective_t_capacity::<Z>(self.config.t_capacity);
-        let (l_f, k_f) = (l as f64, self.k as f64);
 
-        let e_t = (l_f / k_f) * (self.c_sum as f64);
-        self.last_estimate = e_t;
-
-        let b = 6.0 * l_f / (k_f * self.config.eps);
-        let eta = laplace_sample(b, &mut self.rng);
-        let n_half = (effective_t as f64) / 2.0;
-        let do_grow = (n_half + e_t + eta) > self.t_hat;
+        // Divide the estimator inequality by its public sensitivity L/k.
+        // c_sum and the noise are consequently both integer estimator units.
+        let eta = self.sampler.sample(&mut self.rng);
+        let noisy_estimate_units = (self.c_sum as i128) + (eta as i128);
+        let do_grow = noisy_estimate_units > (self.t_hat_units as i128);
 
         self.c_sum = 0;
-        self.flushes_since_check = 0;
+        self.evictions_since_check = 0;
 
         do_grow.then_some(effective_t)
     }
 
     pub(crate) fn reset_counters(&mut self) {
         self.c_sum = 0;
-        self.flushes_since_check = 0;
+        self.evictions_since_check = 0;
+        self.pending_grow = None;
     }
 
-    pub(crate) fn on_tree_grown<const Z: usize, const A: usize>(
-        &mut self,
-        new_height: u64,
-        _fill_target: u64,
-    ) {
+    pub(crate) fn on_tree_grown<const Z: usize, const A: usize>(&mut self, new_height: u64, _fill_target: u64) {
         self.total_resizes += 1;
         self.config.t_capacity = self.config.t_capacity.saturating_mul(2);
 
         let l_new = leaf_count(new_height);
         let effective_t = effective_t_capacity::<Z>(self.config.t_capacity);
         self.k = dp_initial_k(effective_t, l_new, A as u64);
-        self.t_hat = dp_epoch(
-            effective_t,
-            l_new,
-            self.k,
-            self.config.eps,
-            self.config.delta,
-            self.config.alpha,
-            A as u64,
-            &mut self.rng,
-        );
+        self.t_hat_units = dp_epoch_units(effective_t, l_new, self.k, self.config.alpha, A as u64, &self.sampler, &mut self.rng);
     }
-}
-
-pub(crate) fn laplace_sample(b: f64, rng: &mut AutoResizeRng) -> f64 {
-    if b <= 0.0 {
-        return 0.0;
-    }
-    // Sample u in (-0.5, 0.5) excluding endpoints to avoid ln(0.0) -> -inf
-    let u: f64 = loop {
-        let val = rng.random::<f64>() - 0.5;
-        if val.abs() < 0.5 {
-            break val;
-        }
-    };
-    -b * u.signum() * (1.0_f64 - 2.0_f64 * u.abs()).ln()
 }
 
 pub(crate) fn dp_initial_k(t_capacity: u64, l: u64, a: u64) -> u64 {
@@ -147,72 +242,65 @@ pub(crate) fn effective_t_capacity<const Z: usize>(t_capacity: u64) -> u64 {
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn dp_epoch(
-    t_capacity: u64,
-    l: u64,
-    k: u64,
-    eps: f64,
-    _delta: f64,
-    alpha: f64,
-    a: u64,
-    rng: &mut AutoResizeRng,
-) -> f64 {
+pub(crate) fn dp_epoch_units(t_capacity: u64, l: u64, k: u64, alpha: f64, a: u64, sampler: &CtDiscreteLaplace, rng: &mut AutoResizeRng) -> i64 {
     let (t, l_f, k_f, a_f) = (t_capacity as f64, l as f64, k as f64, a as f64);
-    let b = 6.0 * l_f / (k_f * eps);
-    let zeta = b * (0.5 / alpha).ln();
-    let theta = laplace_sample(b, rng);
-    dp_det_threshold(t, l_f, k_f, alpha, a_f) + theta - 2.0 * zeta
+    let sensitivity = l_f / k_f;
+    let deterministic_units = ((dp_det_threshold(t, l_f, k_f, alpha, a_f, RESIZE_ATTEMPTS as f64) - t / 2.0) / sensitivity).floor() as i64;
+    let estimator_zeta_units = sampler.upper_quantile(alpha);
+    let attempts_tail = (2.0 * alpha).powi(RESIZE_ATTEMPTS as i32);
+    let attempts_zeta_units = sampler.upper_quantile(attempts_tail);
+    let theta_units = sampler.sample(rng);
+    deterministic_units
+        .wrapping_add(theta_units)
+        .wrapping_sub(estimator_zeta_units)
+        .wrapping_sub(attempts_zeta_units)
 }
 
 pub(crate) use crate::oblivious::binomial_solver::dp_det_threshold;
 
 use crate::OramValue;
 
-impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValue>
-    ObliviousHistogram<Z, K, A, S, V>
-{
+impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValue> ObliviousHistogram<Z, K, A, S, V> {
     /// Enables differentially private auto-resize for the histogram ($O(1)$).
     ///
-    /// Periodically evaluates stash collision signals with Laplace noise, doubling capacity when threshold is exceeded.
+    /// Periodically evaluates stash collision signals with discrete Laplace noise, doubling capacity when threshold is exceeded.
     pub fn enable_auto_resize(&mut self, cfg: AutoResizeConfig) {
-        self.configure_auto_resize(cfg, false);
+        self.configure_auto_resize(cfg, false, true);
     }
 
-    pub(crate) fn enable_deferred_auto_resize(&mut self, cfg: AutoResizeConfig) {
-        self.configure_auto_resize(cfg, true);
+    pub(crate) fn enable_deferred_auto_resize(&mut self, cfg: AutoResizeConfig, emits_grow_signal: bool) {
+        self.configure_auto_resize(cfg, true, emits_grow_signal);
     }
 
-    fn configure_auto_resize(&mut self, cfg: AutoResizeConfig, defer_checks: bool) {
+    fn configure_auto_resize(&mut self, cfg: AutoResizeConfig, defer_checks: bool, emits_grow_signal: bool) {
         let l = leaf_count(self.height);
         let effective_t = effective_t_capacity::<Z>(cfg.t_capacity);
         let k = dp_initial_k(effective_t, l, A as u64);
         let mut rng = AutoResizeRng::seed_from_u64(cfg.seed);
-        let t_hat = dp_epoch(effective_t, l, k, cfg.eps, cfg.delta, cfg.alpha, A as u64, &mut rng);
+        let sampler = CtDiscreteLaplace::new(cfg.eps);
+        let t_hat_units = dp_epoch_units(effective_t, l, k, cfg.alpha, A as u64, &sampler, &mut rng);
 
         self.auto_resize = Some(AutoResizeState {
             config: cfg,
             k,
-            t_hat,
-            flushes_since_check: 0,
+            t_hat_units,
+            evictions_since_check: 0,
             c_sum: 0,
-            last_estimate: 0.0,
             total_resizes: 0,
             deferred: defer_checks,
+            emits_grow_signal,
+            pending_grow: None,
+            sampler,
             rng,
         });
     }
 
-    pub(crate) fn check_deferred_auto_resize_signal(&mut self) -> Option<u64> {
-        self.auto_resize.as_ref()?;
+    pub(crate) fn take_deferred_auto_resize_signal(&mut self) -> Option<u64> {
         debug_assert!(
-            self.auto_resize.as_ref().map_or(false, |a| a.deferred),
-            "deferred auto-resize checks should only be polled in deferred mode"
+            self.auto_resize.as_ref().is_some_and(|auto| auto.deferred && auto.emits_grow_signal),
+            "deferred auto-resize signals should only be consumed in deferred mode"
         );
-        if self.should_check_auto_resize() {
-            self.check_auto_resize_signal()
-        } else {
-            None
-        }
+        self.auto_resize.as_mut()?.pending_grow.take()
     }
 
     pub(crate) fn apply_deferred_auto_resize_grow(&mut self, fill_target: u64) {
@@ -253,7 +341,8 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
         assert!(self.height < MAX_TREE_HEIGHT, "cannot grow past MAX_TREE_HEIGHT");
         let old_height = self.height;
         let new_len = self.physical_memory.len() * 2;
-        self.physical_memory.reserve_exact(new_len - self.physical_memory.len());
+        self.physical_memory
+            .reserve_exact(new_len + S - self.physical_memory.len());
         self.physical_memory.resize(new_len, crate::OramBlock::<K, V>::dummy());
         self.height += 1;
         self.epoch = self.epoch.saturating_add(1);
@@ -301,15 +390,120 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
             let h = self.height;
             let current_epoch = self.epoch;
             let c_t = self.stash.count_matching_blocks(h, evict_leaf, current_epoch);
-            auto.record_flush(c_t);
+            auto.record_eviction(c_t);
         }
     }
 
     pub(super) fn check_and_maybe_resize_post_eviction(&mut self) {
-        if self.auto_resize.as_ref().map_or(false, |a| !a.deferred)
-            && self.should_check_auto_resize()
-        {
+        if !self.should_check_auto_resize() {
+            return;
+        }
+
+        if self.auto_resize.as_ref().is_some_and(|auto| auto.deferred) {
+            let height = self.height;
+            let auto = self.auto_resize.as_mut().expect("auto-resize state disappeared");
+            let grow_signal = auto.evaluate_signal::<Z>(height);
+            if auto.emits_grow_signal {
+                auto.pending_grow = grow_signal;
+            }
+        } else {
             self.check_and_maybe_resize();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn discrete_laplace_parameters_are_conservative() {
+        let sampler = CtDiscreteLaplace::new(1.0);
+
+        assert!(sampler.effective_epsilon() <= 1.0);
+        assert!(sampler.truncation_bound() <= 2.0f64.powi(-(SAMPLER_STATISTICAL_BITS as i32)));
+        assert_eq!(sampler.failure_cutoff, EPS_ONE_FAILURE_CUTOFF);
+        assert_eq!(sampler.trials, EPS_ONE_TRIALS);
+    }
+
+    #[test]
+    fn discrete_laplace_always_consumes_the_fixed_number_of_words() {
+        let sampler = CtDiscreteLaplace::new(1.0);
+
+        for constant_word in [0, u64::MAX] {
+            let mut words = 0usize;
+            let sample = sampler.sample_with(&mut || {
+                words += 1;
+                constant_word
+            });
+            assert_eq!(words, 2 * sampler.trials);
+            assert_eq!(sample, 0);
+        }
+
+        let mut words = 0usize;
+        let positive_cap = sampler.sample_with(&mut || {
+            words += 1;
+            if words <= sampler.trials {
+                0
+            } else {
+                u64::MAX
+            }
+        });
+        assert_eq!(words, 2 * sampler.trials);
+        assert_eq!(positive_cap, sampler.trials as i64);
+
+        let mut words = 0usize;
+        let negative_cap = sampler.sample_with(&mut || {
+            words += 1;
+            if words <= sampler.trials {
+                u64::MAX
+            } else {
+                0
+            }
+        });
+        assert_eq!(words, 2 * sampler.trials);
+        assert_eq!(negative_cap, -(sampler.trials as i64));
+    }
+
+    #[test]
+    fn discrete_laplace_quantile_bounds_the_upper_tail() {
+        let sampler = CtDiscreteLaplace::new(1.0);
+        let probability = 0.05;
+        let z = sampler.upper_quantile(probability);
+        let q = (sampler.failure_cutoff as f64) / (SAMPLER_PROBABILITY_SCALE as f64);
+
+        assert!(q.powi((z + 1) as i32) / (1.0 + q) <= probability);
+        if z > 0 {
+            assert!(q.powi(z as i32) / (1.0 + q) > probability);
+        }
+    }
+
+    #[test]
+    fn discrete_laplace_seed_is_deterministic_and_non_degenerate() {
+        let sampler = CtDiscreteLaplace::new(1.0);
+        let mut first = AutoResizeRng::seed_from_u64(19);
+        let mut second = AutoResizeRng::seed_from_u64(19);
+        let first_samples: Vec<_> = (0..32).map(|_| sampler.sample(&mut first)).collect();
+        let second_samples: Vec<_> = (0..32).map(|_| sampler.sample(&mut second)).collect();
+
+        assert_eq!(first_samples, second_samples);
+        assert!(first_samples.iter().any(|&sample| sample < 0));
+        assert!(first_samples.iter().any(|&sample| sample > 0));
+    }
+
+    #[test]
+    fn verification_core_matches_the_epsilon_one_sampler() {
+        let sampler = CtDiscreteLaplace::new(1.0);
+        let mut rng = AutoResizeRng::seed_from_u64(23);
+        let mut words = [0u64; EPS_ONE_RANDOM_WORDS];
+        for word in &mut words {
+            *word = rng.random::<u64>();
+        }
+        let mut words_iter = words.iter().copied();
+
+        assert_eq!(
+            discrete_laplace_eps_one_from_words(&words),
+            sampler.sample_with(&mut || words_iter.next().unwrap())
+        );
     }
 }

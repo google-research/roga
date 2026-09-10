@@ -151,6 +151,11 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
         self.stash.occupancy()
     }
 
+    /// Returns whether the lazy post-resize activation sweep is currently active.
+    pub fn sweep_active(&self) -> bool {
+        self.evict_ctr < self.sweep_end
+    }
+
     /// For benchmarking: sets the lazy sweep migration window active state ($O(1)$).
     pub fn set_sweep_window_active(&mut self, active: bool) {
         if active {

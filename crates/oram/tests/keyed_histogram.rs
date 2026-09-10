@@ -362,9 +362,7 @@ fn test_resize_no_panic() {
     let cfg = AutoResizeConfig {
         t_capacity,
         eps: 1.0,
-        delta: 1e-6,
         alpha: 0.05,
-        r: 1,
         seed: 17 ^ 0x0A00_5000_EAEA,
     };
     h.enable_auto_resize(cfg);
@@ -376,5 +374,4 @@ fn test_resize_no_panic() {
 
     assert!(h.capacity() > 512);
 }
-
 

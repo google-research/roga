@@ -36,6 +36,26 @@ use crate::{ct, Address, StashSize};
 use router::{build_distribute_marks_router, prepare_key, shard_index_for_tag};
 
 type ExportedEntry<const K: usize = 16, V = u64> = (u64, [u8; K], V);
+const SHARD_COORDINATION_SECURITY_BITS: usize = 80;
+
+fn deflated_per_shard_resize_target<const Z: usize>(
+    total_baseline_target: u64,
+    shard_count: usize,
+) -> u64 {
+    let z_scale = (Z as u64 / 4).max(1);
+    let effective_total_target = total_baseline_target.saturating_mul(z_scale);
+    let per_shard_target = effective_total_target / (shard_count as u64);
+    let slack = crate::oblivious::binomial_solver::shard_coordination_slack(
+        per_shard_target as usize,
+        shard_count,
+        SHARD_COORDINATION_SECURITY_BITS,
+    ) as u64;
+    let deflated_effective_target = per_shard_target.saturating_sub(slack);
+
+    // AutoResizeConfig stores targets in baseline-Z=4 units. Flooring is
+    // conservative: it can only make the resize happen earlier.
+    (deflated_effective_target / z_scale).max(1)
+}
 
 /// Trait for an individual ORAM shard processing batch chunks in parallel.
 pub trait OramShard<const K: usize = 16, V = u64>: Send + Sync {
@@ -369,22 +389,19 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
     }
 
     /// Enables deferred auto-resizing across all shards with inter-shard coordination slack ($O(M)$).
+    ///
+    /// Every shard executes the same estimator path, but only shard 0's signal controls coordinated growth.
     pub fn enable_auto_resize(&mut self, cfg: AutoResizeConfig) {
         self.auto_resize = true;
         let shard_count = self.router.shard_count;
-        let per_shard_target = cfg.t_capacity / (shard_count as u64);
-        let slack = crate::oblivious::binomial_solver::shard_coordination_slack(
-            per_shard_target as usize,
-            shard_count,
-            40,
-        ) as u64;
-        let deflated_target = per_shard_target.saturating_sub(slack).max(1);
+        let deflated_target =
+            deflated_per_shard_resize_target::<Z>(cfg.t_capacity, shard_count);
 
         for (i, tree) in self.router.shards.iter_mut().enumerate() {
             let mut shard_cfg = cfg;
             shard_cfg.t_capacity = deflated_target;
             shard_cfg.seed = cfg.seed.wrapping_add(i as u64);
-            tree.enable_deferred_auto_resize(shard_cfg);
+            tree.enable_deferred_auto_resize(shard_cfg, i == 0);
         }
     }
 
@@ -485,13 +502,9 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
         if !auto_resize {
             return;
         }
-        let grow_signals: Vec<Option<u64>> = trees
-            .par_iter_mut()
-            .with_min_len(1)
-            .map(|tree| tree.check_deferred_auto_resize_signal())
-            .collect();
+        let grow_signal = trees.first_mut().and_then(|tree| tree.take_deferred_auto_resize_signal());
 
-        if let Some(target) = grow_signals[0] {
+        if let Some(target) = grow_signal {
             trees
                 .par_iter_mut()
                 .with_min_len(1)
@@ -499,6 +512,22 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
             *capacity *= 2;
             *size_in_bytes *= 2;
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coordination_slack_is_computed_in_effective_key_units() {
+        // These are equivalent targets: Z=4 stores the effective target
+        // directly, while Z=64 stores it in baseline-Z=4 units.
+        let z4 = deflated_per_shard_resize_target::<4>(102_400, 16);
+        let z64 = deflated_per_shard_resize_target::<64>(6_400, 16);
+
+        assert!(z4.saturating_sub(z64 * 16) < 16);
+        assert_eq!(z64, 297);
     }
 }
 

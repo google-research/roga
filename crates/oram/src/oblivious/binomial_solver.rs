@@ -170,9 +170,16 @@ pub fn binom_ppf(n: usize, p: f64, alpha: f64) -> usize {
     k.saturating_sub(1)
 }
 
-pub fn dp_det_threshold(t: f64, l: f64, k: f64, alpha: f64, r: f64) -> f64 {
+pub fn dp_det_threshold(
+    t: f64,
+    l: f64,
+    k: f64,
+    alpha: f64,
+    a: f64,
+    attempts: f64,
+) -> f64 {
     let exact_margin = t - (l / k) * (binom_ppf(t as usize, k / l, alpha) as f64);
-    t - 2.0 * r * k - exact_margin
+    t - (1.0 + attempts) * a * k - exact_margin
 }
 
 /// Computes the inter-shard slack Delta_m such that with probability 1 - 2^-lambda,
@@ -228,7 +235,7 @@ mod tests {
     fn test_boundary_p_equals_one() {
         assert_eq!(binom_pmf(16, 16, 1.0), 1.0);
         assert_eq!(binom_pmf(16, 15, 1.0), 0.0);
-        let res = dp_det_threshold(64.0, 16.0, 16.0, 0.05, 1.0);
+        let res = dp_det_threshold(64.0, 16.0, 16.0, 0.05, 1.0, 2.0);
         assert!(!res.is_nan(), "dp_det_threshold produced NaN for p=1.0!");
     }
 

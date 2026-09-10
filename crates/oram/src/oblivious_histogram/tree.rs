@@ -49,12 +49,7 @@ impl CompleteBinaryTreeIndex for TreeIndex {
 pub(super) fn tree_height_for_capacity(block_capacity: crate::Address, z: usize) -> u64 {
     assert!(z.is_power_of_two(), "Z must be a power of two");
     let height = u64::from(block_capacity.ilog2()).saturating_sub(z.trailing_zeros() as u64).max(1);
-    debug_assert!(
-        height <= MAX_TREE_HEIGHT,
-        "height {} exceeds MAX_TREE_HEIGHT {}",
-        height,
-        MAX_TREE_HEIGHT
-    );
+    debug_assert!(height <= MAX_TREE_HEIGHT, "height {} exceeds MAX_TREE_HEIGHT {}", height, MAX_TREE_HEIGHT);
     height
 }
 
@@ -71,6 +66,8 @@ pub struct Bucket<const Z: usize = 16, const K: usize = 16, V = u64> {
 
 impl<const Z: usize, const K: usize, V: OramValue> Default for Bucket<Z, K, V> {
     fn default() -> Self {
-        Self { blocks: [crate::OramBlock::dummy(); Z] }
+        Self {
+            blocks: [crate::OramBlock::dummy(); Z],
+        }
     }
 }

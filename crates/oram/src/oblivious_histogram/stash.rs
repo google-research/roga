@@ -14,7 +14,20 @@ use crate::oblivious::compaction::{compact_marks, compact_payload, distribute_pa
 use crate::oblivious::ct::Cmov as CtCmov;
 use crate::OramBlock;
 use crate::{ct, OramMetrics, OramValue, StashSize};
-use cmov::Cmov;
+
+/// Counts real blocks matching a sampled leaf and epoch using a fixed scan.
+#[inline]
+pub(crate) fn count_matching_blocks_in<const K: usize, V: OramValue>(blocks: &[OramBlock<K, V>], height: u64, target_leaf: TreeIndex, target_epoch: u8) -> u64 {
+    let mut result = 0u64;
+    for block in blocks {
+        let is_real = block.tag.ct_is_real();
+        let leaf_match = ct::ct_eq(block.tag.to_leaf(height), target_leaf);
+        let epoch_match = ct::ct_eq(block.epoch as u64, target_epoch as u64);
+        let matches = is_real & leaf_match & epoch_match;
+        result += matches as u64;
+    }
+    result
+}
 
 /// Oblivious stash buffer holding both path buckets ($(L+1)Z$ slots) and overflow storage ($S$ slots).
 ///
@@ -51,31 +64,17 @@ impl<const Z: usize, const K: usize, const S: usize, V: OramValue> ObliviousStas
     }
 
     /// Computes the deepest common ancestor level along the eviction path to `target_leaf` in constant time ($O(1)$).
-    pub fn deepest_shared_level(
-        target_leaf: TreeIndex,
-        block_tag: u64,
-        height: u64,
-        block_is_dummy: u8,
-    ) -> TreeIndex {
-        let arbitrary_leaf: TreeIndex = 1 << height;
-        let mut block_leaf = block_tag.to_leaf(height);
-        block_leaf.cmovnz(&arbitrary_leaf, block_is_dummy);
-
+    #[inline(always)]
+    pub fn deepest_shared_level(target_leaf: TreeIndex, block_tag: u64, height: u64) -> TreeIndex {
+        let block_leaf = block_tag.to_leaf(height);
         let differing_bits = target_leaf ^ block_leaf;
         let shared_prefix_bits = differing_bits.leading_zeros() as u64;
-        let raw_level = (height as i64) + (shared_prefix_bits as i64) - 63;
-        let mask = raw_level >> 63;
-        let level = (raw_level as u64) & !(mask as u64);
-        level.saturating_sub(1)
+        (height + shared_prefix_bits) - 64
     }
 
     /// Obliviously writes blocks from the stash back to the eviction path towards `position` ($O(Z \cdot L + S)$).
     #[allow(unused_mut)]
-    pub fn write_to_path(
-        &mut self,
-        physical_memory: &mut [OramBlock<K, V>],
-        position: TreeIndex,
-    ) -> OramMetrics {
+    pub fn write_to_path(&mut self, physical_memory: &mut [OramBlock<K, V>], position: TreeIndex) -> OramMetrics {
         let mut metrics = OramMetrics::default();
 
         let height = position.ct_depth();
@@ -89,9 +88,7 @@ impl<const Z: usize, const K: usize, const S: usize, V: OramValue> ObliviousStas
             let _t2 = timing_scope!(&mut metrics.write_to_path_assign_real);
             for block in &self.blocks {
                 let block_is_real = block.tag.ct_is_real();
-                let block_is_dummy = ct::ct_not(block_is_real);
-                let block_level =
-                    Self::deepest_shared_level(position, block.tag, height, block_is_dummy);
+                let block_level = Self::deepest_shared_level(position, block.tag, height);
 
                 let mut assigned: u8 = 0;
                 for level in (0..n_levels).rev() {
@@ -99,8 +96,7 @@ impl<const Z: usize, const K: usize, const S: usize, V: OramValue> ObliviousStas
                     let legal_level = ct::ct_lt(level_u64, block_level + 1);
                     let bucket_not_full = ct::ct_lt(level_counts[level], z_u64);
 
-                    let should_assign =
-                        legal_level & bucket_not_full & ct::ct_not(assigned) & block_is_real;
+                    let should_assign = legal_level & bucket_not_full & ct::ct_not(assigned) & block_is_real;
                     level_counts[level] += should_assign as u64;
                     assigned |= should_assign;
                 }
@@ -140,17 +136,14 @@ impl<const Z: usize, const K: usize, const S: usize, V: OramValue> ObliviousStas
                 let dst_idx = position.ct_node_on_path(depth, height) as usize;
                 let src_start = (height - depth) as usize * Z;
                 let dst_start = dst_idx * Z;
-                physical_memory[dst_start..dst_start + Z]
-                    .copy_from_slice(&self.blocks[src_start..src_start + Z]);
+                physical_memory[dst_start..dst_start + Z].copy_from_slice(&self.blocks[src_start..src_start + Z]);
             }
             self.blocks[..self.path_size].fill(OramBlock::dummy());
         }
         #[cfg(feature = "profile")]
         {
-            metrics.write_to_path = metrics.write_to_path_setup
-                + metrics.write_to_path_assign_real
-                + metrics.write_to_path_compact
-                + metrics.write_to_path_copy_back;
+            metrics.write_to_path =
+                metrics.write_to_path_setup + metrics.write_to_path_assign_real + metrics.write_to_path_compact + metrics.write_to_path_copy_back;
         }
         metrics
     }
@@ -192,26 +185,19 @@ impl<const Z: usize, const K: usize, const S: usize, V: OramValue> ObliviousStas
         let work_len = overflow_len + count;
         self.insert_scratch.resize(work_len, OramBlock::<K, V>::dummy());
         self.insert_scratch[..overflow_len].copy_from_slice(&self.blocks[self.path_size..]);
-        self.insert_scratch[overflow_len..work_len].fill(OramBlock::dummy());
 
         for i in 0..count {
             let (tag, epoch, value, payload, is_real_update) = update_at(i);
             let is_real_update = is_real_update & 1;
             let block = &mut self.insert_scratch[overflow_len + i];
+            *block = OramBlock::dummy();
             block.assign_if(tag, epoch, value, &payload, is_real_update);
         }
 
-        self.compact_marks.resize(work_len + 1, 0);
-        self.compact_marks[0] = 0;
-        for i in 0..work_len {
-            self.compact_marks[i + 1] =
-                self.compact_marks[i] + self.insert_scratch[i].tag.ct_is_real() as usize;
-        }
+        compact_marks(&self.insert_scratch[..work_len], &mut self.compact_marks);
         let real_len = self.compact_marks[work_len];
         if real_len > overflow_len {
-            panic!(
-                "stash overflow on buffered batch insert: {real_len} overflow blocks need capacity at most {overflow_len}"
-            );
+            panic!("stash overflow on buffered batch insert: {real_len} overflow blocks need capacity at most {overflow_len}");
         }
 
         compact_payload(&mut self.insert_scratch, &self.compact_marks);
@@ -240,15 +226,7 @@ impl<const Z: usize, const K: usize, const S: usize, V: OramValue> ObliviousStas
 
     /// Counts real blocks matching `target_leaf` at `height` and `target_epoch` in constant time ($O(M)$).
     pub fn count_matching_blocks(&self, height: u64, target_leaf: TreeIndex, target_epoch: u8) -> u64 {
-        let mut result = 0u64;
-        for block in &self.blocks {
-            let is_real = block.tag.ct_is_real();
-            let leaf_match = ct::ct_eq(block.tag.to_leaf(height), target_leaf);
-            let epoch_match = ct::ct_eq(block.epoch as u64, target_epoch as u64);
-            let matches = is_real & leaf_match & epoch_match;
-            result += matches as u64;
-        }
-        result
+        count_matching_blocks_in(&self.blocks, height, target_leaf, target_epoch)
     }
 
     /// Counts real blocks satisfying predicate `pred` ($O(M)$).
@@ -268,42 +246,32 @@ impl<const Z: usize, const K: usize, const S: usize, V: OramValue> ObliviousStas
             let bucket_index = position.ct_node_on_path(depth as u64, height);
             let dst_start = depth * Z;
             let src_start = (bucket_index as usize) * Z;
-            self.blocks[dst_start..dst_start + Z]
-                .copy_from_slice(&physical_memory[src_start..src_start + Z]);
+            self.blocks[dst_start..dst_start + Z].copy_from_slice(&physical_memory[src_start..src_start + Z]);
         }
     }
 
     /// Reads a sibling bucket into scratch memory during lazy migration sweep ($O(Z)$).
-    pub fn read_sibling_bucket(
-        &mut self,
-        physical_memory: &[OramBlock<K, V>],
-        sibling_leaf: TreeIndex,
-    ) {
+    pub fn read_sibling_bucket(&mut self, physical_memory: &[OramBlock<K, V>], sibling_leaf: TreeIndex) {
         let sibling_start = (sibling_leaf as usize) * Z;
         if self.insert_scratch.len() < Z {
             self.insert_scratch.resize(Z, OramBlock::dummy());
         }
-        self.insert_scratch[..Z]
-            .copy_from_slice(&physical_memory[sibling_start..sibling_start + Z]);
+        self.insert_scratch[..Z].copy_from_slice(&physical_memory[sibling_start..sibling_start + Z]);
     }
 
     /// Obliviously sorts and deduplicates stash blocks along the path to `position` ($O(M \log^2 M)$).
     pub fn merge_accumulate_for_path(&mut self, position: TreeIndex) -> OramMetrics {
         let height = position.ct_depth();
-        crate::oblivious::compaction::sort_reduce(&mut self.blocks, &mut self.sort_keys, |block| {
-            block.tag.path_rank_key(position, height)
-        })
+        crate::oblivious::compaction::sort_reduce(&mut self.blocks, &mut self.sort_keys, |block| block.tag.path_rank_key(position, height))
     }
 }
 
 pub(crate) fn build_leaf_to_root_layout_marks<const Z: usize>(
-    marks: &mut Vec<usize>,
-    level_counts: &[u64],
-    overflow_count: usize,
-    path_size: usize,
-    len: usize,
+    marks: &mut Vec<usize>, level_counts: &[u64], overflow_count: usize, path_size: usize, len: usize,
 ) {
-    marks.resize(len + 1, 0);
+    if marks.len() != len + 1 {
+        marks.resize(len + 1, 0);
+    }
     marks[0] = 0;
 
     let mut prefix_sum = 0usize;

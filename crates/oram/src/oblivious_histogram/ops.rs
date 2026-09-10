@@ -16,9 +16,7 @@ use super::ObliviousHistogram;
 
 use crate::OramValue;
 
-impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValue>
-    ObliviousHistogram<Z, K, A, S, V>
-{
+impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValue> ObliviousHistogram<Z, K, A, S, V> {
     /// Appends `val` to the aggregate value under `key` ($O(1)$ amortized, $O(Z \cdot L + S \log S)$ on eviction).
     ///
     /// The update is buffered in the stash and flushed to the tree periodically every `A` inserts.
@@ -41,11 +39,9 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
         let mut offset = 0usize;
 
         while offset < count {
-            let evict_period = A as u64;
+            let evict_period = self.current_evict_interval();
             let interval_offset = self.append_ctr % evict_period;
-            let until_evict =
-                if interval_offset == 0 { evict_period } else { evict_period - interval_offset }
-                    as usize;
+            let until_evict = if interval_offset == 0 { evict_period } else { evict_period - interval_offset } as usize;
             let chunk_len = (count - offset).min(until_evict);
 
             {
@@ -75,12 +71,24 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
 
     fn finish_append_after_insert(&mut self) {
         self.append_ctr += 1;
+        let evict_period = self.current_evict_interval();
 
-        if !self.append_ctr.is_multiple_of(A as u64) {
+        if !self.append_ctr.is_multiple_of(evict_period) {
             return;
         }
 
         self.evict_after_insert();
+    }
+
+    /// Returns the public eviction interval, doubled in rate while a resize sweep is active.
+    #[inline]
+    fn current_evict_interval(&self) -> u64 {
+        let ordinary = A as u64;
+        if self.evict_ctr < self.sweep_end {
+            (ordinary / 2).max(1)
+        } else {
+            ordinary
+        }
     }
 
     /// Reads and removes the aggregated value at `key` via path access ($O(Z \cdot L + S \log S)$).
@@ -147,5 +155,23 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
         self.update_peak_overflow();
 
         self.check_and_maybe_resize_post_eviction();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    #[test]
+    fn resize_sweep_halves_the_public_eviction_interval() {
+        let mut rng = StdRng::seed_from_u64(7);
+        let mut histogram = ObliviousHistogram::<4, 16, 20, 64>::new(1024, &mut rng);
+
+        assert_eq!(histogram.current_evict_interval(), 20);
+        histogram.set_sweep_window_active(true);
+        assert_eq!(histogram.current_evict_interval(), 10);
+        histogram.set_sweep_window_active(false);
+        assert_eq!(histogram.current_evict_interval(), 20);
     }
 }
