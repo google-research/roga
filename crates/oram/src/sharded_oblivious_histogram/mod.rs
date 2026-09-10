@@ -22,6 +22,7 @@ pub mod router;
 use aes::cipher::generic_array::GenericArray;
 use aes::cipher::KeyInit;
 use aes::Aes128;
+use cmov::Cmov;
 use rand::rngs::StdRng;
 use rand::{CryptoRng, Rng, RngExt, SeedableRng};
 use rayon::prelude::*;
@@ -33,7 +34,10 @@ use crate::oblivious_histogram::routing::OramAddress;
 use crate::oblivious_histogram::{AutoResizeConfig, ObliviousHistogram};
 use crate::{ct, Address, StashSize};
 
-use router::{build_distribute_marks_router, prepare_key, shard_index_for_tag};
+use router::{
+    build_distribute_marks_router, count_shard_loads_oblivious, prepare_key,
+    shard_index_for_tag,
+};
 
 type ExportedEntry<const K: usize = 16, V = u64> = (u64, [u8; K], V);
 const SHARD_COORDINATION_SECURITY_BITS: usize = 80;
@@ -120,21 +124,18 @@ impl<const K: usize, V: OramValue> RouterFrontend<K, V> {
             },
         );
 
-        self.router_counts.fill(0);
-        for i in 0..reduced_len {
-            let tag = self.router_blocks[i].tag;
-            let shard = shard_index_for_tag(tag, shard_count);
-            self.router_counts[shard] += 1;
-        }
+        count_shard_loads_oblivious(
+            &mut self.router_counts,
+            &self.router_blocks,
+            reduced_len,
+        );
 
-        let mut max_load = 0usize;
+        let mut max_load = 0u64;
         for &c in &self.router_counts {
-            if (c as usize) > max_load {
-                max_load = c as usize;
-            }
+            max_load.cmovnz(&c, ct::ct_lt(max_load, c));
         }
         assert!(
-            max_load <= per_shard_sub_quota,
+            max_load <= per_shard_sub_quota as u64,
             "sharded OSAM batch overflow: frontend shard load {max_load} exceeds per-frontend sub-quota {per_shard_sub_quota}"
         );
 
@@ -370,7 +371,15 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
         frontend_count: usize,
     ) -> usize {
         let f = frontend_count.max(1);
-        f * router::suggested_per_shard_quota(batch_size / f, shard_count, security_bits)
+        // Split the advertised per-flush failure probability across all
+        // frontends. ceil(log2(F)) is exact for the power-of-two frontend
+        // counts used by the artifact and conservative otherwise.
+        let frontend_union_bits = usize::BITS as usize - (f - 1).leading_zeros() as usize;
+        f * router::suggested_per_shard_quota(
+            batch_size / f,
+            shard_count,
+            security_bits.saturating_add(frontend_union_bits),
+        )
     }
 
     /// Returns the number of physical ORAM shards ($O(1)$).
@@ -472,7 +481,7 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
 
     /// Appends a key-value update to the batch buffer, flushing automatically when full ($O(1)$ amortized).
     pub fn append(&mut self, key: &[u8], value: V) {
-        let (_, prepared_key) = prepare_key(&self.router.prf, key, self.shard_count());
+        let prepared_key = crate::oblivious::crypto::prf_tag(&self.router.prf, key);
         let payload = crate::oblivious::copy_prefix::<K>(key);
         self.router.pending.push(OramBlock::real(prepared_key, self.epoch, value, payload));
         if self.router.pending.len() >= self.router.batch_capacity {
@@ -518,6 +527,12 @@ impl<const Z: usize, const K: usize, const A: usize, const S: usize, V: OramValu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn eighty_bit_quota_includes_the_frontend_union_bound() {
+        let quota = ShardedObliviousHistogram::<64>::suggested_per_shard_quota(4096, 16, 80);
+        assert_eq!(quota, 648);
+    }
 
     #[test]
     fn coordination_slack_is_computed_in_effective_key_units() {
