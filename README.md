@@ -21,6 +21,12 @@ This crate provides two core types:
 
 Both types expose a uniform `append` / `flush` / `read_total` interface via inherent methods.
 
+Scheduled bulk readout returns a public, fixed-length array. `readout` is the
+global-sort reference implementation, while `readout_tree_aware` and
+`readout_subtree_partitioned` exploit the routing-tree invariant for lower
+work and parallel execution. The complete output, including dummy blocks, must
+be encrypted before leaving trusted execution.
+
 The auto-resize mechanism is based on the *Resizable Oblivious Histograms* draft
 (see `papers/Resizable_Oblivious_Histograms/`).
 
@@ -46,9 +52,7 @@ let mut hist = ObliviousHistogram::<4, 16>::new(
 hist.enable_auto_resize(AutoResizeConfig {
     t_capacity: 32,
     eps: 1.0,
-    delta: 1e-6,
     alpha: 0.05,
-    r: 1,
     seed: 7,
 });
 
@@ -56,6 +60,9 @@ for word in ["apple", "banana", "apple", "cherry"] {
     hist.append(word.as_bytes(), 1u64);
 }
 assert_eq!(hist.read_total(b"apple"), 2);
+
+let output = hist.readout_tree_aware();
+assert_eq!(output.len(), hist.readout_len());
 ```
 
 ### Sharded example
