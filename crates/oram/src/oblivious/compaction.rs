@@ -116,10 +116,14 @@ pub fn distribute_payload<T: Cmov>(arr: &mut [T], payload: &[usize]) {
 /// Computes the prefix sums of real elements to form compaction markers.
 pub fn compact_marks<V, T: Reducible<V>>(records: &[T], marks: &mut Vec<usize>) {
     let n = records.len();
-    marks.resize(n + 1, 0);
+    if marks.len() != n + 1 {
+        marks.resize(n + 1, 0);
+    }
     marks[0] = 0;
-    for i in 0..n {
-        marks[i + 1] = marks[i] + records[i].ct_is_real() as usize;
+    let mut sum = 0usize;
+    for (i, record) in records.iter().enumerate() {
+        sum += record.ct_is_real() as usize;
+        marks[i + 1] = sum;
     }
 }
 

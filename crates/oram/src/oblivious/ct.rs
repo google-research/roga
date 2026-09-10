@@ -31,13 +31,17 @@ pub fn ct_eq<T: CmovEq>(a: T, b: T) -> u8 {
 #[inline]
 pub fn ct_eq_bytes<const N: usize>(a: &[u8; N], b: &[u8; N]) -> u8 {
     if N == 16 {
-        let a_val = u128::from_ne_bytes(a[..16].try_into().unwrap());
-        let b_val = u128::from_ne_bytes(b[..16].try_into().unwrap());
-        ct_eq(a_val, b_val)
+        let a0 = u64::from_ne_bytes(a[..8].try_into().unwrap());
+        let a1 = u64::from_ne_bytes(a[8..16].try_into().unwrap());
+        let b0 = u64::from_ne_bytes(b[..8].try_into().unwrap());
+        let b1 = u64::from_ne_bytes(b[8..16].try_into().unwrap());
+        let diff = (a0 ^ b0) | (a1 ^ b1);
+        (((diff | diff.wrapping_neg()) >> 63) ^ 1) as u8
     } else if N == 8 {
         let a_val = u64::from_ne_bytes(a[..8].try_into().unwrap());
         let b_val = u64::from_ne_bytes(b[..8].try_into().unwrap());
-        ct_eq(a_val, b_val)
+        let diff = a_val ^ b_val;
+        (((diff | diff.wrapping_neg()) >> 63) ^ 1) as u8
     } else {
         let mut acc = 0u8;
         for (&x, &y) in a.iter().zip(b.iter()) {
@@ -169,9 +173,20 @@ pub fn ct_swap<T: Cmov>(a: &mut T, b: &mut T, cond: u8) {
 /// AVX2 / SSE / 64-bit chunked conditional swap for arbitrary types T.
 #[inline(always)]
 pub unsafe fn cswap_fast_ptr<T: Cmov>(ptr_i: *mut T, ptr_j: *mut T, choice: bool) {
-    let size = std::mem::size_of::<T>();
+    // Opaque to LLVM so the blend mask cannot be re-branched (rustc 1.96 + AVX-512).
+    let choice = {
+        let mut c = choice as u8;
+        #[cfg(target_arch = "x86_64")]
+        core::arch::asm!("/*{0}*/", inout(reg_byte) c, options(nomem, nostack, preserves_flags));
+        #[cfg(not(target_arch = "x86_64"))]
+        {
+            c = std::hint::black_box(c);
+        }
+        c != 0
+    };
     #[cfg(target_arch = "x86_64")]
     {
+        let size = std::mem::size_of::<T>();
         use core::arch::x86_64::{__m128i, _mm_blendv_epi8, _mm_set1_epi8};
         use core::arch::x86_64::{__m256i, _mm256_blendv_epi8, _mm256_set1_epi8};
 

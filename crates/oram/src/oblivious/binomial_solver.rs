@@ -63,12 +63,67 @@ pub fn binom_cdf(n: usize, k: usize, p: f64) -> f64 {
 
 pub fn binom_sf(n: usize, k: usize, p: f64) -> f64 {
     if k == 0 {
-        1.0
-    } else if k > n {
-        0.0
-    } else {
-        1.0 - binom_cdf(n, k - 1, p)
+        return 1.0;
     }
+    if k > n || p <= 0.0 {
+        return 0.0;
+    }
+    if p >= 1.0 {
+        return 1.0;
+    }
+
+    // Sum the upper tail directly. Computing it as `1 - cdf` loses every
+    // probability below roughly 2^-53 to floating-point cancellation, which
+    // is not sufficient for the 80-bit sharding parameters used by ROGA.
+    let mut term = binom_pmf(n, k, p);
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for i in k..=n {
+        // Kahan summation keeps the small tail terms from being discarded.
+        let adjusted = term - correction;
+        let next_sum = sum + adjusted;
+        correction = (next_sum - sum) - adjusted;
+        sum = next_sum;
+
+        if i == n {
+            break;
+        }
+        term *= ((n - i) as f64 / (i + 1) as f64) * (p / (1.0 - p));
+        if term == 0.0 || (term < sum * f64::EPSILON && i >= (n as f64 * p) as usize) {
+            break;
+        }
+    }
+    sum.min(1.0)
+}
+
+/// Direct lower-tail sum `Pr[X <= k]` for a point below the binomial mode.
+/// This avoids both cancellation and an O(n) traversal from zero.
+fn binom_lower_tail(n: usize, k: usize, p: f64) -> f64 {
+    if k >= n || p <= 0.0 {
+        return 1.0;
+    }
+    if p >= 1.0 {
+        return 0.0;
+    }
+
+    let mut term = binom_pmf(n, k, p);
+    let mut sum = 0.0;
+    let mut correction = 0.0;
+    for i in (0..=k).rev() {
+        let adjusted = term - correction;
+        let next_sum = sum + adjusted;
+        correction = (next_sum - sum) - adjusted;
+        sum = next_sum;
+
+        if i == 0 {
+            break;
+        }
+        term *= (i as f64 / (n - i + 1) as f64) * ((1.0 - p) / p);
+        if term == 0.0 || (term < sum * f64::EPSILON && i <= (n as f64 * p) as usize) {
+            break;
+        }
+    }
+    sum.min(1.0)
 }
 
 pub fn suggested_per_shard_quota(
@@ -92,12 +147,25 @@ pub fn suggested_per_shard_quota(
 }
 
 pub fn binom_ppf(n: usize, p: f64, alpha: f64) -> usize {
+    if p >= 1.0 {
+        return n;
+    }
+    if p <= 0.0 {
+        return 0;
+    }
     let start = ((n as f64 * p - 3.0 * (n as f64 * p * (1.0 - p)).sqrt()) as usize).min(n);
     let mut cdf = binom_cdf(n, start, p);
     let mut k = start;
+    let n_f = n as f64;
+    let ln_gamma_n_plus_1 = ln_gamma(n_f + 1.0);
+    let ln_p = p.ln();
+    let ln_1_minus_p = (1.0 - p).ln();
     while k < n && cdf < alpha {
         k += 1;
-        cdf += binom_pmf(n, k, p);
+        let k_f = k as f64;
+        let ln_comb = ln_gamma_n_plus_1 - ln_gamma(k_f + 1.0) - ln_gamma(n_f - k_f + 1.0);
+        let pmf = (ln_comb + k_f * ln_p + (n_f - k_f) * ln_1_minus_p).exp();
+        cdf += pmf;
     }
     k.saturating_sub(1)
 }
@@ -120,7 +188,11 @@ pub fn shard_coordination_slack(
     let m = shard_count as f64;
     let p = 1.0 / m;
     let total_n = per_shard_capacity * shard_count;
-    let target = 2.0f64.powi(-(security_bits as i32)) * p;
+    // Bound every shard on both sides of the common mean. If all shard loads
+    // lie in [mean-lower, mean+upper], no shard can be more than
+    // lower+upper ahead of the coordinator. Split 2^-lambda across the 2m
+    // tail events.
+    let target = 2.0f64.powi(-(security_bits as i32)) * p / 2.0;
     let mut low = per_shard_capacity;
     let mut high = total_n;
     while low < high {
@@ -131,7 +203,21 @@ pub fn shard_coordination_slack(
             low = mid + 1;
         }
     }
-    low.saturating_sub(per_shard_capacity)
+    let upper_slack = low.saturating_sub(per_shard_capacity);
+
+    let mut low_deviation = 0usize;
+    let mut high_deviation = per_shard_capacity;
+    while low_deviation < high_deviation {
+        let mid = low_deviation + (high_deviation - low_deviation) / 2;
+        let cutoff = per_shard_capacity.saturating_sub(mid);
+        if binom_lower_tail(total_n, cutoff, p) <= target {
+            high_deviation = mid;
+        } else {
+            low_deviation = mid + 1;
+        }
+    }
+
+    upper_slack.saturating_add(low_deviation)
 }
 
 #[cfg(test)]
@@ -144,5 +230,23 @@ mod tests {
         assert_eq!(binom_pmf(16, 15, 1.0), 0.0);
         let res = dp_det_threshold(64.0, 16.0, 16.0, 0.05, 1.0);
         assert!(!res.is_nan(), "dp_det_threshold produced NaN for p=1.0!");
+    }
+
+    #[test]
+    fn upper_tail_remains_nonzero_below_machine_epsilon() {
+        let tail = binom_sf(1024, 150, 1.0 / 16.0);
+        assert!(tail > 0.0);
+        assert!(tail < f64::EPSILON);
+    }
+
+    #[test]
+    fn quota_really_meets_the_requested_eighty_bit_bound() {
+        let n = 1024;
+        let m = 16;
+        let quota = suggested_per_shard_quota(n, m, 80);
+        let target = 2.0f64.powi(-80) / m as f64;
+
+        assert!(binom_sf(n, quota, 1.0 / m as f64) <= target);
+        assert!(binom_sf(n, quota - 1, 1.0 / m as f64) > target);
     }
 }
