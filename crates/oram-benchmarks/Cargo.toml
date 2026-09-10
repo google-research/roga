@@ -41,8 +41,3 @@ path = "benches/case_study_sim.rs"
 name = "mawi_replay"
 harness = false
 path = "benches/mawi_replay.rs"
-
-[[bench]]
-name = "microbench"
-harness = false
-path = "benches/microbench.rs"

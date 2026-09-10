@@ -251,9 +251,7 @@ pub fn create_backend(
                     hist.enable_auto_resize(oram::AutoResizeConfig {
                         t_capacity,
                         eps: 1.0,
-                        delta: 1e-6,
                         alpha: 0.05,
-                        r: if $a_val == 20 && $z_val == 64 { 2 } else { 1 },
                         seed: seed ^ 0x0A00_5000_EAEA,
                     });
                     Box::new(oram_backend::OramBenchWrapper::new_sharded(
@@ -315,9 +313,7 @@ fn configure_resizing_osam<const Z: usize, const A: usize, const S: usize>(
     let cfg = oram::AutoResizeConfig {
         t_capacity,
         eps: 1.0,
-        delta: 1e-6,
         alpha: 0.05,
-        r: if A == 20 && Z == 64 { 2 } else { 1 },
         seed: seed ^ 0x0A00_5000_EAEA,
     };
     h.enable_auto_resize(cfg);
